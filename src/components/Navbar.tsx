@@ -6,8 +6,8 @@ import { usePathname } from 'next/navigation'
 import { LayoutDashboard, Wallet, BarChart3, History, User, Menu, X, Zap, ArrowLeftRight, Shield, TrendingUp } from 'lucide-react'
 import { ConnectButton } from '@rainbow-me/rainbowkit'
 
-// Stable style object for the logo wordmark — avoids creating a new object per render
-const LOGO_STYLE = { fontFamily: 'Sora, sans-serif', fontWeight: 700, color: '#200052', fontSize: '1.125rem' } as const
+// Stable style object for the logo wordmark
+const LOGO_STYLE = { fontFamily: 'Plus Jakarta Sans, sans-serif', fontWeight: 700, color: 'var(--text-primary)', fontSize: '1.125rem' } as const
 
 const navLinks = [
   { href: '/',             label: 'Dashboard',      icon: LayoutDashboard },
@@ -30,11 +30,17 @@ export default function Navbar() {
 
         {/* Logo — hard left */}
         <Link href="/" className="flex items-center gap-2 shrink-0">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center shadow-lg shadow-violet-200">
-            <Zap size={16} className="text-white" fill="white" />
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center shadow-lg shadow-violet-200 overflow-hidden">
+            <img
+              src="/inkboard-logo.png"
+              alt="InkBoard"
+              width={32}
+              height={32}
+              className="object-cover w-full h-full"
+            />
           </div>
           <span style={LOGO_STYLE}>
-            Mon<span style={{ color: '#836EF9' }}>board</span>
+            Ink<span style={{ color: '#7C3AED' }}>Board</span>
           </span>
         </Link>
 

@@ -4,9 +4,9 @@ import { useState } from 'react'
 import { useWallet }        from '@/contexts/WalletContext'
 import { usePortfolio }     from '@/contexts/PortfolioContext'
 import { usePreferences }   from '@/contexts/PreferencesContext'
-import type { Currency, TimeRange } from '@/contexts/PreferencesContext'
+import type { Currency, TimeRange, Theme } from '@/contexts/PreferencesContext'
 import { CURRENCIES, CURRENCY_LABELS } from '@/contexts/PreferencesContext'
-import { User, Copy, ExternalLink, Shield, CheckCircle, Lock } from 'lucide-react'
+import { User, Copy, ExternalLink, Shield, CheckCircle, Lock, Sun, Moon } from 'lucide-react'
 import { shortenAddr } from '@/contexts/TransactionContext'
 
 // Single stable object reference — avoids creating a new object on every render
@@ -18,7 +18,7 @@ export default function AccountPage() {
 
   const { address, isConnected, disconnect } = useWallet()
   const { totals, status } = usePortfolio()
-  const { currency, defaultRange, setCurrency, setDefaultRange, fmtValue, rates, ratesUpdatedAt } = usePreferences()
+  const { currency, defaultRange, theme, setCurrency, setDefaultRange, setTheme, fmtValue, rates, ratesUpdatedAt } = usePreferences()
 
   const isLoading = status === 'loading'
 
@@ -40,7 +40,7 @@ export default function AccountPage() {
       </div>
 
       {/* Wallet Card */}
-      <div className="card p-6 relative overflow-hidden" style={{ background: 'linear-gradient(135deg, #836EF9 0%, #6d28d9 100%)' }}>
+      <div className="card p-6 relative overflow-hidden" style={{ background: 'linear-gradient(135deg, #7C3AED 0%, #6d28d9 100%)' }}>
         <div className="absolute top-0 right-0 w-40 h-40 rounded-full opacity-10" style={{ background: 'radial-gradient(circle, white, transparent)', transform: 'translate(30%, -40%)' }} />
         <div className="flex items-start gap-4 relative z-10">
           <div className="w-16 h-16 rounded-2xl bg-white/20 flex items-center justify-center">
@@ -64,7 +64,7 @@ export default function AccountPage() {
                     {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
                   </button>
                   <a
-                    href={`https://monadexplorer.com/address/${address}`}
+                    href={`https://explorer.inkonchain.com/address/${address}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-violet-200 hover:text-white transition-colors"
@@ -97,13 +97,13 @@ export default function AccountPage() {
           </div>
           <div className="flex-1">
             <h3 className="font-display font-semibold text-gray-800" style={SORA}>
-              {hasNFT ? '✅ Premium Access Unlocked' : 'MonBoard NFT Access'}
+              {hasNFT ? '✅ Premium Access Unlocked' : 'InkBoard NFT Access'}
             </h3>
             {hasNFT ? (
-              <p className="text-sm text-emerald-700 mt-1">You hold a MonBoard NFT and have access to all premium features including Telegram alerts and wallet monitoring.</p>
+              <p className="text-sm text-emerald-700 mt-1">You hold a InkBoard NFT and have access to all premium features including Telegram alerts and wallet monitoring.</p>
             ) : (
               <>
-                <p className="text-sm text-gray-500 mt-1 mb-3">Hold a MonBoard NFT to unlock premium features:</p>
+                <p className="text-sm text-gray-500 mt-1 mb-3">Hold a InkBoard NFT to unlock premium features:</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
                   {[
                     { icon: '🔔', text: 'Real-time Telegram alerts' },
@@ -118,7 +118,7 @@ export default function AccountPage() {
                   ))}
                 </div>
                 <button className="btn-primary text-sm px-5">
-                  Get MonBoard NFT — Coming Soon
+                  Get InkBoard NFT — Coming Soon
                 </button>
               </>
             )}
@@ -130,6 +130,36 @@ export default function AccountPage() {
       <div className="card p-5">
         <h2 className="font-display font-semibold text-gray-800 mb-4" style={SORA}>Preferences</h2>
         <div className="space-y-4">
+          {/* Theme */}
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-800">Appearance</p>
+              <p className="text-xs text-gray-400">Switch between light and dark mode</p>
+            </div>
+            <button
+              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+              className={`relative w-16 h-8 rounded-full transition-all duration-300 ${
+                theme === 'dark'
+                  ? 'bg-violet-600'
+                  : 'bg-violet-100 border border-violet-200'
+              }`}
+              aria-label="Toggle theme"
+            >
+              <div
+                className={`absolute top-1 w-6 h-6 rounded-full flex items-center justify-center transition-all duration-300 ${
+                  theme === 'dark'
+                    ? 'left-9 bg-violet-900'
+                    : 'left-1 bg-white shadow-sm'
+                }`}
+              >
+                {theme === 'dark'
+                  ? <Moon size={14} className="text-violet-300" />
+                  : <Sun size={14} className="text-violet-500" />
+                }
+              </div>
+            </button>
+          </div>
+
           {/* Currency */}
           <div className="flex items-center justify-between">
             <div>
@@ -201,15 +231,15 @@ export default function AccountPage() {
 
       {/* About */}
       <div className="card p-5">
-        <h2 className="font-display font-semibold text-gray-800 mb-3" style={SORA}>About MonBoard</h2>
+        <h2 className="font-display font-semibold text-gray-800 mb-3" style={SORA}>About InkBoard</h2>
         <p className="text-sm text-gray-500 mb-3">
-          MonBoard is the premier portfolio dashboard for the Monad ecosystem. Track your assets, DeFi positions, and NFTs in one place.
+          InkBoard is the premier portfolio dashboard for the Ink ecosystem. Track your assets, DeFi positions, and NFTs in one place.
         </p>
         <div className="flex flex-wrap gap-2">
           {[
             { label: 'Version', value: '0.1.0 (Beta)' },
-            { label: 'Network', value: 'Monad Mainnet' },
-            { label: 'RPC', value: 'monad.xyz' },
+            { label: 'Network', value: 'Ink Mainnet' },
+            { label: 'RPC', value: 'rpc-gel.inkonchain.com' },
           ].map(info => (
             <div key={info.label} className="flex-1 min-w-[100px] bg-violet-50 rounded-lg p-3">
               <p className="text-xs text-gray-400">{info.label}</p>

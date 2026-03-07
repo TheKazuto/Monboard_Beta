@@ -8,12 +8,16 @@ import Providers from '@/components/Providers'
 const ADSENSE_CLIENT = process.env.NEXT_PUBLIC_ADSENSE_CLIENT ?? ''
 
 export const metadata: Metadata = {
-  title: 'MonBoard — Your Monad Portfolio Dashboard',
-  description: 'The ultimate dashboard for Monad ecosystem. Track your portfolio, DeFi positions, NFTs and get real-time alerts.',
-  keywords: ['monad', 'blockchain', 'portfolio', 'defi', 'nft', 'dashboard'],
+  title: 'InkBoard — Your Ink DeFi Dashboard',
+  description: 'The ultimate dashboard for the Ink ecosystem. Track your portfolio, DeFi positions, NFTs and get real-time alerts.',
+  keywords: ['ink', 'blockchain', 'portfolio', 'defi', 'nft', 'dashboard', 'kraken', 'superchain'],
+  icons: {
+    icon: '/favicon.ico',
+    apple: '/apple-touch-icon.png',
+  },
   openGraph: {
-    title: 'MonBoard',
-    description: 'Your Monad Portfolio Dashboard',
+    title: 'InkBoard',
+    description: 'Your Ink DeFi Dashboard',
     type: 'website',
   },
 }
@@ -24,8 +28,17 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en">
-      <body className="min-h-screen" style={{ background: 'var(--monad-bg)' }}>
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Prevent flash of wrong theme — runs before React hydration */}
+        <script dangerouslySetInnerHTML={{ __html: `
+          try {
+            var t = localStorage.getItem('mb_theme');
+            if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+          } catch(e) {}
+        ` }} />
+      </head>
+      <body className="min-h-screen" style={{ background: 'var(--ink-bg)' }}>
         {ADSENSE_CLIENT && (
           <Script
             async
