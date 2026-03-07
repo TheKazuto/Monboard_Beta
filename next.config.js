@@ -43,6 +43,7 @@ const CSP = [
     "https://relay.walletconnect.com",
     "https://relay.walletconnect.org",
     "https://api.web3modal.com",
+    "https://api.web3modal.org",
     "https://pulse.walletconnect.org",
     "https://rainbowkit.com",
     "https://ethereum-rpc.publicnode.com",
