@@ -2,6 +2,10 @@
   "name": "ink-dashboard",
   "version": "0.1.0",
   "private": true,
+  "trustedDependencies": [
+    "@opennextjs/cloudflare",
+    "esbuild"
+  ],
   "scripts": {
     "dev": "next dev",
     "build": "next build",
