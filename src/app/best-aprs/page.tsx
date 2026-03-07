@@ -4,7 +4,19 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { RefreshCw, ExternalLink, TrendingUp, Zap, Layers, BookOpen, Coins } from 'lucide-react'
 import { SORA } from '@/lib/styles'
 import AdBanner from '@/components/AdBanner'
-import type { AprEntry } from '@/app/api/best-aprs/route'
+
+// Duplicated from api/best-aprs/route.ts to avoid importing server-only module
+interface AprEntry {
+  protocol:   string
+  logo:       string
+  url:        string
+  tokens:     string[]
+  label:      string
+  apr:        number
+  tvl:        number
+  type:       'pool' | 'vault' | 'lend'
+  isStable:   boolean
+}
 
 // ─── Auto-refresh interval ────────────────────────────────────────────────────
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000  // 5 minutes
@@ -12,9 +24,9 @@ const REFRESH_INTERVAL_MS = 5 * 60 * 1000  // 5 minutes
 // ─── APR badge ────────────────────────────────────────────────────────────────
 function AprBadge({ apr }: { apr: number }) {
   const color =
-    apr >= 20 ? 'bg-emerald-100 text-emerald-700 border-emerald-200' :
-    apr >= 10 ? 'bg-violet-100 text-violet-700 border-violet-200' :
-    apr >= 5  ? 'bg-blue-100   text-blue-700   border-blue-200'   :
+    apr >= 20 ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark-badge-white' :
+    apr >= 10 ? 'bg-violet-100 text-violet-700 border-violet-200 dark-badge-white' :
+    apr >= 5  ? 'bg-blue-100   text-blue-700   border-blue-200   dark-badge-white' :
                 'bg-gray-100   text-gray-600   border-gray-200'
 
   return (
@@ -64,12 +76,24 @@ function AprCard({ entry, rank, showType = false }: { entry: AprEntry; rank: num
       {/* Logo + Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1.5">
-          <span className="text-base">{entry.logo}</span>
+          {entry.logo.startsWith('http') || entry.logo.startsWith('/') ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={entry.logo} alt={entry.protocol} width={20} height={20} className="rounded-md object-contain" />
+          ) : (
+            <span className="text-base">{entry.logo}</span>
+          )}
           <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">{entry.protocol}</span>
           {showType && <TypeBadge type={entry.type} />}
         </div>
         <p className="text-sm font-semibold text-gray-800 truncate mb-1.5" style={SORA}>{entry.label}</p>
-        <TokenPills tokens={entry.tokens} />
+        <div className="flex items-center gap-2">
+          <TokenPills tokens={entry.tokens} />
+          {entry.tvl > 0 && (
+            <span className="text-xs text-gray-400 font-medium">
+              TVL ${entry.tvl >= 1_000_000 ? `${(entry.tvl / 1_000_000).toFixed(1)}M` : entry.tvl >= 1_000 ? `${(entry.tvl / 1_000).toFixed(0)}K` : entry.tvl.toFixed(0)}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* APR + Link */}
@@ -143,12 +167,35 @@ function Empty({ label }: { label: string }) {
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 interface AprData {
-  stableAPRs:  AprEntry[]
-  pools:       AprEntry[]
-  vaults:      AprEntry[]
-  lends:       AprEntry[]
-  lastUpdated: number
+  stableAPRs:   AprEntry[]
+  pools:        AprEntry[]
+  vaults:       AprEntry[]
+  lends:        AprEntry[]
+  lastUpdated:  number
   totalEntries: number
+}
+
+function categorize(entries: AprEntry[]): AprData {
+  const stableAPRs: AprEntry[] = []
+  const pools: AprEntry[] = []
+  const vaults: AprEntry[] = []
+  const lends: AprEntry[] = []
+
+  for (const e of entries) {
+    if (e.isStable) { stableAPRs.push(e); continue }
+    if (e.type === 'pool')  pools.push(e)
+    else if (e.type === 'vault') vaults.push(e)
+    else if (e.type === 'lend')  lends.push(e)
+  }
+
+  return {
+    stableAPRs: stableAPRs.slice(0, 10),
+    pools:      pools.slice(0, 10),
+    vaults:     vaults.slice(0, 10),
+    lends:      lends.slice(0, 10),
+    lastUpdated: Date.now(),
+    totalEntries: entries.length,
+  }
 }
 
 export default function BestAprsPage() {
@@ -165,7 +212,9 @@ export default function BestAprsPage() {
       const res = await fetch('/api/best-aprs', { cache: 'no-store' })
       if (res.ok) {
         const json = await res.json()
-        setData(json)
+        // API returns a flat AprEntry[] — categorize client-side
+        const entries: AprEntry[] = Array.isArray(json) ? json : []
+        setData(categorize(entries))
         setLastLoaded(new Date())
       }
     } catch { /* keep previous data */ } finally {
@@ -208,7 +257,7 @@ export default function BestAprsPage() {
             Best APRs
           </h1>
           <p className="text-gray-400 text-sm">
-            The best APRs in the Monad ecosystem.
+            The best APRs in the Ink ecosystem.
           </p>
           {lastLoaded && (
             <p className="text-xs text-gray-300 mt-1">
