@@ -32,7 +32,7 @@ export default function Navbar() {
         <Link href="/" className="flex items-center gap-2 shrink-0">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center shadow-lg shadow-violet-200 overflow-hidden">
             <img
-              src="/inkboard-logo.png"
+              src="/monad-logo.png"
               alt="MonBoard"
               width={32}
               height={32}
