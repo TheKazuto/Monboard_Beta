@@ -1,6 +1,7 @@
 'use client'
 
 import TopTokens from '@/components/TopTokens'
+import TopEarners from '@/components/TopEarners'
 import RecentActivity from '@/components/RecentActivity'
 import FearAndGreed from '@/components/FearAndGreed'
 import TokenExposure from '@/components/TokenExposure'
@@ -335,6 +336,9 @@ export default function Dashboard() {
 
       {/* Portfolio History Chart */}
       <PortfolioHistory />
+
+      {/* Top Earners — 24h gainers in the Monad ecosystem */}
+      <TopEarners />
 
       {/* Bottom Row: Top Tokens + Fear & Greed + Ad */}
       {/* Right col is flex-col so AdBanner stretches to fill space below Fear & Greed */}
