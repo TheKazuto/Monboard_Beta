@@ -65,11 +65,11 @@ async function getTokenPricesUSD(symbols: string[]): Promise<Record<string, numb
 
   try {
     const apiKey   = process.env.COINGECKO_API_KEY
-    const baseUrl  = apiKey ? 'https://pro-api.coingecko.com' : 'https://api.coingecko.com'
-    const keyParam = apiKey ? `&x_cg_pro_api_key=${apiKey}` : ''
+    const cgHeaders: Record<string, string> = { Accept: 'application/json' }
+    if (apiKey) cgHeaders['x-cg-demo-api-key'] = apiKey
     const res = await fetch(
-      `${baseUrl}/api/v3/simple/price?ids=${ids.join(',')}&vs_currencies=usd${keyParam}`,
-      { cache: 'no-store' }
+      `https://api.coingecko.com/api/v3/simple/price?ids=${ids.join(',')}&vs_currencies=usd`,
+      { headers: cgHeaders, cache: 'no-store' }
     )
     const data = await res.json()
     for (const sym of toFetch) {

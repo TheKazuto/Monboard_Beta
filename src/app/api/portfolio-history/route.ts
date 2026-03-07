@@ -46,10 +46,10 @@ async function fetchPriceHistory(coinId: string, days: number): Promise<[number,
     // Fix #18 (INFO): Uses COINGECKO_API_KEY (server-only, no NEXT_PUBLIC_ prefix).
     // Consistent with top-tokens/route.ts after fix #11.
     const apiKey   = process.env.COINGECKO_API_KEY
-    const baseUrl  = apiKey ? 'https://pro-api.coingecko.com' : 'https://api.coingecko.com'
-    const keyParam = apiKey ? `&x_cg_pro_api_key=${apiKey}` : ''
-    const url      = `${baseUrl}/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=${days}&interval=daily${keyParam}`
-    const res      = await fetch(url, { cache: 'no-store' })
+    const cgHeaders: Record<string, string> = { Accept: 'application/json' }
+    if (apiKey) cgHeaders['x-cg-demo-api-key'] = apiKey
+    const url      = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=${days}&interval=daily`
+    const res      = await fetch(url, { headers: cgHeaders, cache: 'no-store' })
     const data     = await res.json()
     return data?.prices ?? []
   } catch {
