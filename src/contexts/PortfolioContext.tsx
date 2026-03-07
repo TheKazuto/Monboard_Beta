@@ -108,6 +108,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   const nftTotalRef   = useRef(0)
   const nftsNoKeyRef  = useRef(false)
   const loadingAddr   = useRef<string | null>(null)
+  const lastAddr      = useRef<string | null>(null)  // track last loaded address
 
   const flush = useCallback((addr: string) => {
     const t = tokenRef.current
@@ -147,6 +148,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     // Already loading this address — don't double-fetch
     if (loadingAddr.current === key) return
     loadingAddr.current = key
+    lastAddr.current    = key
 
     // Seed from cache while re-fetching so UI doesn't flash empty
     if (entry) {
@@ -235,8 +237,10 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   // Debounce address changes to avoid wagmi flicker on navigation
   useEffect(() => {
     if (!isConnected || !address) {
-      // Only reset if we don't have cached data (avoid flicker on nav)
-      const hasCached = address && portfolioCache.has(address.toLowerCase())
+      // During navigation, wagmi briefly loses connection.
+      // Check cache for current OR last-known address to avoid flicker.
+      const addrToCheck = address ?? lastAddr.current
+      const hasCached = addrToCheck && portfolioCache.has(addrToCheck.toLowerCase())
       if (!hasCached) {
         loadingAddr.current = null
         setTotals(ZERO)
