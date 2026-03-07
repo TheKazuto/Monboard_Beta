@@ -137,8 +137,11 @@ export async function getMonPrice(): Promise<number> {
     return monPriceCache.price
   }
   try {
+    const apiKey   = process.env.COINGECKO_API_KEY
+    const baseUrl  = apiKey ? 'https://pro-api.coingecko.com' : 'https://api.coingecko.com'
+    const keyParam = apiKey ? `&x_cg_pro_api_key=${apiKey}` : ''
     const res = await fetch(
-      'https://api.coingecko.com/api/v3/simple/price?ids=monad&vs_currencies=usd',
+      `${baseUrl}/api/v3/simple/price?ids=monad&vs_currencies=usd${keyParam}`,
       { cache: 'no-store' },
     )
     const d     = await res.json()

@@ -212,9 +212,19 @@ export default function BestAprsPage() {
       const res = await fetch('/api/best-aprs', { cache: 'no-store' })
       if (res.ok) {
         const json = await res.json()
-        // API returns a flat AprEntry[] — categorize client-side
-        const entries: AprEntry[] = Array.isArray(json) ? json : []
-        setData(categorize(entries))
+        // API returns { stableAPRs, pools, vaults, lends, ... } or a flat array
+        if (Array.isArray(json)) {
+          setData(categorize(json))
+        } else if (json.pools || json.vaults || json.lends || json.stableAPRs) {
+          setData({
+            stableAPRs:   json.stableAPRs ?? [],
+            pools:        json.pools ?? [],
+            vaults:       json.vaults ?? [],
+            lends:        json.lends ?? [],
+            lastUpdated:  json.lastUpdated ?? Date.now(),
+            totalEntries: json.totalEntries ?? 0,
+          })
+        }
         setLastLoaded(new Date())
       }
     } catch { /* keep previous data */ } finally {

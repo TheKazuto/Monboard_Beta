@@ -33,14 +33,14 @@ export default function Navbar() {
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center shadow-lg shadow-violet-200 overflow-hidden">
             <img
               src="/inkboard-logo.png"
-              alt="InkBoard"
+              alt="MonBoard"
               width={32}
               height={32}
               className="object-cover w-full h-full"
             />
           </div>
           <span style={LOGO_STYLE}>
-            Ink<span style={{ color: '#7C3AED' }}>Board</span>
+            Mon<span style={{ color: '#7C3AED' }}>Board</span>
           </span>
         </Link>
 

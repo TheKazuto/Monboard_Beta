@@ -51,8 +51,11 @@ export async function GET(req: NextRequest) {
     try {
       // /coins/markets returns both current_price and image in a single call —
       // no need for a separate /simple/price request (Fix #6).
+      const apiKey   = process.env.COINGECKO_API_KEY
+      const baseUrl  = apiKey ? 'https://pro-api.coingecko.com' : 'https://api.coingecko.com'
+      const keyParam = apiKey ? `&x_cg_pro_api_key=${apiKey}` : ''
       const marketRes = await fetch(
-        `https://api.coingecko.com/api/v3/coins/markets?ids=${coinIds}&vs_currency=usd&per_page=20`,
+        `${baseUrl}/api/v3/coins/markets?ids=${coinIds}&vs_currency=usd&per_page=20${keyParam}`,
         { cache: 'no-store' }
       )
       const marketData = await marketRes.json()

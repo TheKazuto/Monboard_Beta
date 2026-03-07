@@ -9,8 +9,11 @@ const CACHE_TTL = 30_000 // 30 seconds
 export async function GET() {
   try {
     const data = await cached('mon-price', async () => {
+      const apiKey  = process.env.COINGECKO_API_KEY
+      const baseUrl = apiKey ? 'https://pro-api.coingecko.com' : 'https://api.coingecko.com'
+      const keyParam = apiKey ? `&x_cg_pro_api_key=${apiKey}` : ''
       const res = await fetch(
-        `https://api.coingecko.com/api/v3/simple/price?ids=${COINGECKO_ID}&vs_currencies=usd&include_24hr_change=true`,
+        `${baseUrl}/api/v3/simple/price?ids=${COINGECKO_ID}&vs_currencies=usd&include_24hr_change=true${keyParam}`,
         { cache: 'no-store' }
       )
       if (!res.ok) throw new Error(`CoinGecko ${res.status}`)
