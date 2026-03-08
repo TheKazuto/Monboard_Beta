@@ -267,7 +267,7 @@ export default function BestAprsPage() {
             Best APRs
           </h1>
           <p className="text-gray-400 text-sm">
-            The best APRs in the Ink ecosystem.
+            The best APRs in the Monad ecosystem.
           </p>
           {lastLoaded && (
             <p className="text-xs text-gray-300 mt-1">

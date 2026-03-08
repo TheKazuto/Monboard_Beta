@@ -64,7 +64,7 @@ export default function AccountPage() {
                     {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
                   </button>
                   <a
-                    href={`https://explorer.inkonchain.com/address/${address}`}
+                    href={`https://monadexplorer.com/address/${address}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-violet-200 hover:text-white transition-colors"
@@ -97,13 +97,13 @@ export default function AccountPage() {
           </div>
           <div className="flex-1">
             <h3 className="font-display font-semibold text-gray-800" style={SORA}>
-              {hasNFT ? '✅ Premium Access Unlocked' : 'InkBoard NFT Access'}
+              {hasNFT ? '✅ Premium Access Unlocked' : 'MonBoard NFT Access'}
             </h3>
             {hasNFT ? (
-              <p className="text-sm text-emerald-700 mt-1">You hold a InkBoard NFT and have access to all premium features including Telegram alerts and wallet monitoring.</p>
+              <p className="text-sm text-emerald-700 mt-1">You hold a MonBoard NFT and have access to all premium features including Telegram alerts and wallet monitoring.</p>
             ) : (
               <>
-                <p className="text-sm text-gray-500 mt-1 mb-3">Hold a InkBoard NFT to unlock premium features:</p>
+                <p className="text-sm text-gray-500 mt-1 mb-3">Hold a MonBoard NFT to unlock premium features:</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
                   {[
                     { icon: '🔔', text: 'Real-time Telegram alerts' },
@@ -118,7 +118,7 @@ export default function AccountPage() {
                   ))}
                 </div>
                 <button className="btn-primary text-sm px-5">
-                  Get InkBoard NFT — Coming Soon
+                  Get MonBoard NFT — Coming Soon
                 </button>
               </>
             )}
@@ -231,15 +231,15 @@ export default function AccountPage() {
 
       {/* About */}
       <div className="card p-5">
-        <h2 className="font-display font-semibold text-gray-800 mb-3" style={SORA}>About InkBoard</h2>
+        <h2 className="font-display font-semibold text-gray-800 mb-3" style={SORA}>About MonBoard</h2>
         <p className="text-sm text-gray-500 mb-3">
-          InkBoard is the premier portfolio dashboard for the Ink ecosystem. Track your assets, DeFi positions, and NFTs in one place.
+          MonBoard is the premier portfolio dashboard for the Monad ecosystem. Track your assets, DeFi positions, and NFTs in one place.
         </p>
         <div className="flex flex-wrap gap-2">
           {[
             { label: 'Version', value: '0.1.0 (Beta)' },
-            { label: 'Network', value: 'Ink Mainnet' },
-            { label: 'RPC', value: 'rpc-gel.inkonchain.com' },
+            { label: 'Network', value: 'Monad Mainnet' },
+            { label: 'RPC', value: 'rpc.monad.xyz' },
           ].map(info => (
             <div key={info.label} className="flex-1 min-w-[100px] bg-violet-50 rounded-lg p-3">
               <p className="text-xs text-gray-400">{info.label}</p>
