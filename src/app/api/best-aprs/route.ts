@@ -511,6 +511,97 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
+// ─── GEARBOX V3 — lending pools (supply APR) ─────────────────────────────────
+// Data sourced from GearBox MarketCompressor on Monad (chainId 143).
+// supplyRate is in RAY (1e27). Static snapshot updated from on-chain scanner.
+// Pools with 0% APR (no active borrowers yet) are excluded automatically.
+
+interface GearboxPoolData {
+  name:       string
+  symbol:     string
+  addr:       string
+  underlying: string
+  decimals:   number
+  supplyRate: bigint       // RAY (1e27)
+  expectedLiq: bigint      // in underlying token units (raw)
+}
+
+const GEARBOX_POOLS: GearboxPoolData[] = [
+  {
+    name: 'Kintsu MON',     symbol: 'dWMON -V3-0',
+    addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689',
+    underlying: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A',
+    decimals: 18,
+    supplyRate: 0n,
+    expectedLiq: 19248140390491775321771n,
+  },
+  {
+    name: 'Magma MON',      symbol: 'dWMON -V3-1',
+    addr: '0x09cA6b76276eC0682adb896418b99CB7E44a58A0',
+    underlying: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A',
+    decimals: 18,
+    supplyRate: 65189496574242111125391641n,   // 6.5189% APR
+    expectedLiq: 328215283299791081684887n,
+  },
+  {
+    name: 'EDGE UltraYield USDC', symbol: 'edgeUSDC',
+    addr: '0x6B343F7B797f1488AA48C49d540690F2b2c89751',
+    underlying: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603',
+    decimals: 6,
+    supplyRate: 14026365025263766873003264n,   // 1.4026% APR
+    expectedLiq: 15164820982208n,
+  },
+  {
+    name: 'EDGE UltraYield USDT', symbol: 'edgeUSDT',
+    addr: '0x164A35F31e4E0F6c45D500962a6978D2cbD5a16b',
+    underlying: '0xe7cd86e13AC4309349F30B3435a9d337750fC82D',
+    decimals: 6,
+    supplyRate: 0n,
+    expectedLiq: 2783295n,
+  },
+  {
+    name: 'EDGE UltraYield AUSD', symbol: 'edgeAUSD',
+    addr: '0xc4173359087CE643235420b7bC610d9B0CF2B82D',
+    underlying: '0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a',
+    decimals: 6,
+    supplyRate: 11844797045165124929819226n,   // 1.1845% APR
+    expectedLiq: 3467177239226n,
+  },
+]
+
+// Token symbol map (underlying address → symbol)
+const GEARBOX_TOKEN_SYMBOLS: Record<string, string> = {
+  '0x3bd359c1119da7da1d913d1c4d2b7c461115433a': 'WMON',
+  '0x754704bc059f8c67012fed69bc8a327a5aafb603': 'USDC',
+  '0xe7cd86e13ac4309349f30b3435a9d337750fc82d': 'USDT',
+  '0x00000000efe302beaa2b3e6e1b18d08d69a9012a': 'AUSD',
+}
+
+function fetchGearbox(): AprEntry[] {
+  const out: AprEntry[] = []
+
+  for (const pool of GEARBOX_POOLS) {
+    // RAY (1e27) → percentage APR
+    const apr = Number(pool.supplyRate) / 1e27 * 100
+    if (apr < 0.01) continue
+
+    const token = GEARBOX_TOKEN_SYMBOLS[pool.underlying.toLowerCase()] ?? 'UNKNOWN'
+
+    out.push({
+      protocol: 'Gearbox',
+      logo: '⚙️',
+      url: 'https://app.gearbox.fi/pools?chainId=143',
+      tokens: [token],
+      label: pool.name,
+      apr,
+      type: 'lend',
+      isStable: isStable(token),
+    })
+  }
+
+  return out
+}
+
 // ─── Fetch all data (used by cache) ──────────────────────────────────────────
 async function fetchAllData() {
   const [morphoR, neverlandR, eulerR, curveR, upshiftR, lagoonR, kuruR, lstR, uniR, pancakeR] =
@@ -543,6 +634,7 @@ async function fetchAllData() {
     ...unwrap(uniR),
     ...unwrap(pancakeR),
     ...getMidas(),
+    ...fetchGearbox(),
   ].filter(e => e.apr > 0)
 
   const byApr = (a: AprEntry, b: AprEntry) => b.apr - a.apr
