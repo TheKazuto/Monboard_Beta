@@ -18,7 +18,7 @@ import { SORA } from '@/lib/styles'
 // This prevents the developer's wallet address from appearing in the public bundle.
 const FEE_RECEIVER = process.env.NEXT_PUBLIC_FEE_RECEIVER ?? ''
 const FEE_PERCENT  = 0.2
-const REFERRER     = 'monboard.xyz'
+const REFERRER     = 'monboard'
 const NATIVE       = '0x0000000000000000000000000000000000000000'
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
