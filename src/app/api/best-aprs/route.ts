@@ -262,42 +262,38 @@ async function fetchCurve(): Promise<AprEntry[]> {
 // ─── UPSHIFT — AUSD vault ─────────────────────────────────────────────────────
 // ─── UPSHIFT — vaults (Monad only) ───────────────────────────────────────────
 // ─── UPSHIFT — vaults (Monad, chainId 143) ──────────────────────────────────
-// Static snapshot — /api/proxy/vaults is a Next.js internal proxy, not
-// accessible server-side. Update this list when new vaults go live.
-// APRs derived from APY using daily compounding: APR = 365 * ((1+APY)^(1/365) - 1)
+// /api/proxy/vaults is inaccessible server-side (Next.js internal proxy).
+// APR derived on-chain: ERC4626 convertToAssets 7-day delta, annualised.
+// convertToAssets(1e18) selector: 0x07a2d13a
 
-interface UpshiftVaultData {
-  name:     string
-  address:  string
-  tokens:   string[]
-  apr:      number   // already converted from APY
-  isStable: boolean
-}
-
-const UPSHIFT_VAULTS: UpshiftVaultData[] = [
-  // earnAUSD — 10% APY → 9.53% APR | AUSD/USDC stable | updated 2026-03-09
+const UPSHIFT_VAULTS_ONCHAIN = [
   {
-    name: 'earnAUSD', address: '0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA',
-    tokens: ['AUSD', 'USDC'], apr: 9.5323, isStable: true,
+    name: 'earnAUSD',
+    address: '0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA',
+    tokens: ['AUSD', 'USDC'],
+    isStable: true,
   },
-  // earnMON Vault — 14% APY → 13.11% APR | WMON/MVT non-stable | updated 2026-03-09
   {
-    name: 'earnMON Vault', address: '0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C',
-    tokens: ['WMON', 'MVT'], apr: 13.1052, isStable: false,
+    name: 'earnMON Vault',
+    address: '0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C',
+    tokens: ['WMON', 'MVT'],
+    isStable: false,
   },
 ]
 
-function fetchUpshift(): AprEntry[] {
-  return UPSHIFT_VAULTS.map(v => ({
-    protocol: 'Upshift',
-    logo:     '🔺',
-    url:      `https://app.upshift.finance/vaults/${v.address}`,
-    tokens:   v.tokens,
-    label:    v.name,
-    apr:      v.apr,
-    type:     'vault' as const,
-    isStable: v.isStable,
-  }))
+async function fetchUpshift(): Promise<AprEntry[]> {
+  return fetchERC4626Vaults(
+    UPSHIFT_VAULTS_ONCHAIN,
+    v => ({
+      protocol: 'Upshift',
+      logo:     '🔺',
+      url:      `https://app.upshift.finance/vaults/${v.address}`,
+      tokens:   v.tokens,
+      label:    v.name,
+      type:     'vault' as const,
+      isStable: v.isStable,
+    })
+  )
 }
 // ─── LAGOON — vaults ──────────────────────────────────────────────────────────
 async function fetchLagoon(): Promise<AprEntry[]> {
@@ -362,15 +358,92 @@ function getMidas(): AprEntry[] {
   ]
 }
 
+// ─── ON-CHAIN ERC4626 APR HELPER ─────────────────────────────────────────────
+// Reads convertToAssets(1e18) at current block and ~7 days ago,
+// then annualises the growth. Works for any ERC4626-compatible vault.
+// Monad produces ~2 blocks/sec → 7d ≈ 7*24*3600*2 = 1_209_600 blocks
+
+const BLOCKS_PER_7D = 1_209_600
+const CONVERT_TO_ASSETS = '0x07a2d13a' + '0000000000000000000000000000000000000000000000000de0b6b3a7640000'
+
+async function getBlockNumber(): Promise<number> {
+  const res = await fetch(MONAD_RPC, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
+    signal: AbortSignal.timeout(5_000),
+  }).then(r => r.json())
+  return parseInt(res?.result ?? '0x0', 16)
+}
+
+async function getPricePerShare(vault: string, block: string): Promise<bigint> {
+  const res = await fetch(MONAD_RPC, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: vault, data: CONVERT_TO_ASSETS }, block] }),
+    signal: AbortSignal.timeout(6_000),
+  }).then(r => r.json())
+  const hex = res?.result ?? '0x0'
+  return hex && hex !== '0x' ? BigInt(hex) : 0n
+}
+
+// Converts 7-day pricePerShare growth to APR (not APY)
+function ppsGrowthToApr(ppsNow: bigint, ppsPast: bigint): number {
+  if (ppsPast === 0n || ppsNow <= ppsPast) return 0
+  const growthPerDay = Number(ppsNow - ppsPast) / Number(ppsPast) / 7
+  const apr = growthPerDay * 365 * 100
+  return apr > 0 && apr < 500 ? apr : 0
+}
+
+interface VaultMeta { name: string; address: string; tokens: string[]; isStable: boolean }
+
+async function fetchERC4626Vaults<T extends VaultMeta>(
+  vaults: T[],
+  toEntry: (v: T, apr: number) => Omit<AprEntry, 'apr'>
+): Promise<AprEntry[]> {
+  try {
+    const currentBlock = await getBlockNumber()
+    const pastBlockHex = '0x' + Math.max(1, currentBlock - BLOCKS_PER_7D).toString(16)
+
+    const pairs = await Promise.all(
+      vaults.map(v => Promise.all([
+        getPricePerShare(v.address, 'latest'),
+        getPricePerShare(v.address, pastBlockHex),
+      ]))
+    )
+
+    return vaults
+      .map((v, i) => {
+        const [ppsNow, ppsPast] = pairs[i]
+        const apr = ppsGrowthToApr(ppsNow, ppsPast)
+        if (apr < 0.01) return null
+        return { ...toEntry(v, apr), apr } as AprEntry
+      })
+      .filter((e): e is AprEntry => e !== null)
+  } catch { return [] }
+}
+
+// ─── MAGMA — gMON vault APR (on-chain) ───────────────────────────────────────
+async function fetchMagmaOnchain(): Promise<any> {
+  try {
+    const GMON = '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081'
+    const currentBlock = await getBlockNumber()
+    const pastBlockHex = '0x' + Math.max(1, currentBlock - BLOCKS_PER_7D).toString(16)
+    const [ppsNow, ppsPast] = await Promise.all([
+      getPricePerShare(GMON, 'latest'),
+      getPricePerShare(GMON, pastBlockHex),
+    ])
+    const apr = ppsGrowthToApr(ppsNow, ppsPast)
+    return apr > 0 ? { apr } : null
+  } catch { return null }
+}
+
 // ─── KINTSU, MAGMA, shMONAD — LST staking vaults (parallel) ─────────────────
 async function fetchLSTVaults(): Promise<AprEntry[]> {
   const [kintsuR, magmaR, shmonadR] = await Promise.allSettled([
     fetch('https://api.kintsu.xyz/v1/apr?chainId=143', {
       signal: AbortSignal.timeout(6_000), cache: 'no-store',
     }).then(r => r.ok ? r.json() : null),
-    // Magma has no public API — APR sourced from app (39% APY → 32.95% APR)
-    // Updated: 2026-03-09. TODO: replace with on-chain calc when RPC is stable.
-    Promise.resolve({ apr: 32.9452 }),
+    // Magma: derive APY on-chain from gMON vault pricePerShare 7-day delta
+    fetchMagmaOnchain(),
     fetch('https://api.shmonad.xyz/v1/apr', {
       signal: AbortSignal.timeout(6_000), cache: 'no-store',
     }).then(r => r.ok ? r.json() : null),
@@ -584,100 +657,52 @@ function buildKintsuEntry(apr: number): AprEntry {
   }
 }
 
-// ─── GEARBOX V3 — lending pools (supply APR) ─────────────────────────────────
-// Data sourced from GearBox MarketCompressor on Monad (chainId 143).
-// supplyRate is in RAY (1e27). Static snapshot updated from on-chain scanner.
-// Pools with 0% APR (no active borrowers yet) are excluded automatically.
+// ─── GEARBOX V3 — lending pools (supply APR) ────────────────────────────────
+// supplyRate read on-chain: IPoolV3.supplyRate() selector 0x6f307dc3 (no args)
+// Returns RAY (1e27 per second). APR = rate / 1e27 * SECONDS_PER_YEAR * 100
 
-interface GearboxPoolData {
-  name:       string
-  symbol:     string
-  addr:       string
-  underlying: string
-  decimals:   number
-  supplyRate: bigint       // RAY (1e27)
-  expectedLiq: bigint      // in underlying token units (raw)
-}
-
-const GEARBOX_POOLS: GearboxPoolData[] = [
-  {
-    name: 'Kintsu MON',     symbol: 'dWMON -V3-0',
-    addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689',
-    underlying: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A',
-    decimals: 18,
-    supplyRate: 0n,
-    expectedLiq: 19248140390491775321771n,
-  },
-  {
-    name: 'Magma MON',      symbol: 'dWMON -V3-1',
-    addr: '0x09cA6b76276eC0682adb896418b99CB7E44a58A0',
-    underlying: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A',
-    decimals: 18,
-    supplyRate: 65189496574242111125391641n,   // 6.5189% APR
-    expectedLiq: 328215283299791081684887n,
-  },
-  {
-    name: 'EDGE UltraYield USDC', symbol: 'edgeUSDC',
-    addr: '0x6B343F7B797f1488AA48C49d540690F2b2c89751',
-    underlying: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603',
-    decimals: 6,
-    supplyRate: 14026365025263766873003264n,   // 1.4026% APR
-    expectedLiq: 15164820982208n,
-  },
-  {
-    name: 'EDGE UltraYield USDT', symbol: 'edgeUSDT',
-    addr: '0x164A35F31e4E0F6c45D500962a6978D2cbD5a16b',
-    underlying: '0xe7cd86e13AC4309349F30B3435a9d337750fC82D',
-    decimals: 6,
-    supplyRate: 0n,
-    expectedLiq: 2783295n,
-  },
-  {
-    name: 'EDGE UltraYield AUSD', symbol: 'edgeAUSD',
-    addr: '0xc4173359087CE643235420b7bC610d9B0CF2B82D',
-    underlying: '0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a',
-    decimals: 6,
-    supplyRate: 11844797045165124929819226n,   // 1.1845% APR
-    expectedLiq: 3467177239226n,
-  },
+const GEARBOX_POOL_LIST = [
+  { name: 'Magma MON',           symbol: 'dWMON-V3-1', addr: '0x09cA6b76276eC0682adb896418b99CB7E44a58A0', token: 'WMON',  isStable: false },
+  { name: 'EDGE UltraYield USDC', symbol: 'edgeUSDC',   addr: '0x6B343F7B797f1488AA48C49d540690F2b2c89751', token: 'USDC',  isStable: true  },
+  { name: 'EDGE UltraYield AUSD', symbol: 'edgeAUSD',   addr: '0xc4173359087CE643235420b7bC610d9B0CF2B82D', token: 'AUSD',  isStable: true  },
+  { name: 'EDGE UltraYield USDT', symbol: 'edgeUSDT',   addr: '0x164A35F31e4E0F6c45D500962a6978D2cbD5a16b', token: 'USDT',  isStable: true  },
+  { name: 'Kintsu MON',           symbol: 'dWMON-V3-0', addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689', token: 'WMON',  isStable: false },
 ]
 
-// Token symbol map (underlying address → symbol)
-const GEARBOX_TOKEN_SYMBOLS: Record<string, string> = {
-  '0x3bd359c1119da7da1d913d1c4d2b7c461115433a': 'WMON',
-  '0x754704bc059f8c67012fed69bc8a327a5aafb603': 'USDC',
-  '0xe7cd86e13ac4309349f30b3435a9d337750fc82d': 'USDT',
-  '0x00000000efe302beaa2b3e6e1b18d08d69a9012a': 'AUSD',
-}
-
-function fetchGearbox(): AprEntry[] {
-  const out: AprEntry[] = []
-
-  for (const pool of GEARBOX_POOLS) {
-    // RAY (1e27) → percentage APR
-    const apr = Number(pool.supplyRate) / 1e27 * 100
-    if (apr < 0.01) continue
-
-    const token = GEARBOX_TOKEN_SYMBOLS[pool.underlying.toLowerCase()] ?? 'UNKNOWN'
-
-    out.push({
-      protocol: 'Gearbox',
-      logo: '⚙️',
-      url: 'https://app.gearbox.fi/pools?chainId=143',
-      tokens: [token],
-      label: pool.name,
-      apr,
-      type: 'lend',
-      isStable: isStable(token),
-    })
-  }
-
-  return out
+async function fetchGearbox(): Promise<AprEntry[]> {
+  try {
+    // supplyRate() — selector 0x6f307dc3
+    const calls = GEARBOX_POOL_LIST.map((p, i) =>
+      ethCall(p.addr, '0x6f307dc3', i + 900)
+    )
+    const results = await rpcBatch(calls)
+    const SECONDS_PER_YEAR = 365 * 24 * 3600
+    const out: AprEntry[] = []
+    for (let i = 0; i < GEARBOX_POOL_LIST.length; i++) {
+      const p = GEARBOX_POOL_LIST[i]
+      const hex = results.find((r: any) => r.id === i + 900)?.result ?? '0x0'
+      if (!hex || hex === '0x' || hex === '0x0') continue
+      const rateRay = BigInt(hex)
+      const apr = Number(rateRay) / 1e27 * SECONDS_PER_YEAR * 100
+      if (apr < 0.01) continue
+      out.push({
+        protocol: 'GearBox V3',
+        logo: '⚙️',
+        url: 'https://app.gearbox.fi/pools?chainId=143',
+        tokens: [p.token],
+        label: p.name,
+        apr,
+        type: 'lend',
+        isStable: p.isStable,
+      })
+    }
+    return out
+  } catch { return [] }
 }
 
 // ─── Fetch all data (used by cache) ──────────────────────────────────────────
 async function fetchAllData() {
-  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR, kintsuVaultR] =
+  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR, kintsuVaultR, upshiftR, gearboxR] =
     await Promise.allSettled([
       fetchMorpho(),
       fetchNeverland(),
@@ -689,6 +714,8 @@ async function fetchAllData() {
       fetchUniswap(),
       fetchPancakeswap(),
       fetchKintsuVault(),
+      fetchUpshift(),
+      fetchGearbox(),
     ])
 
   function unwrap(r: PromiseSettledResult<AprEntry[]>): AprEntry[] {
@@ -705,10 +732,10 @@ async function fetchAllData() {
     ...unwrap(lstR),
     ...unwrap(uniR),
     ...unwrap(pancakeR),
-    ...getMidas(),
-    ...fetchGearbox(),
-    ...fetchUpshift(),   // static snapshot — synchronous
     ...unwrap(kintsuVaultR),
+    ...unwrap(upshiftR),
+    ...unwrap(gearboxR),
+    ...getMidas(),
   ].filter(e => e.apr > 0)
 
   const byApr = (a: AprEntry, b: AprEntry) => b.apr - a.apr
@@ -732,12 +759,10 @@ async function fetchAllData() {
 export async function GET() {
   const now = Date.now()
 
-  // Return cached data if fresh
   if (serverCache && !serverCache.promise && now - serverCache.fetchedAt < CACHE_TTL) {
     return NextResponse.json(serverCache.data)
   }
 
-  // Deduplicate in-flight requests — reuse if another request is already fetching
   if (serverCache?.promise) {
     try {
       const data = await serverCache.promise
@@ -745,7 +770,6 @@ export async function GET() {
     } catch { /* fall through to retry */ }
   }
 
-  // Fire new fetch, store promise for dedup
   const promise = fetchAllData()
 
   serverCache = {
@@ -759,9 +783,7 @@ export async function GET() {
     serverCache = { data, fetchedAt: Date.now(), promise: null }
     return NextResponse.json(data)
   } catch {
-    // Clear promise so next request retries
     if (serverCache) serverCache.promise = null
-    // Return stale data if available
     if (serverCache?.data) {
       return NextResponse.json(serverCache.data)
     }
