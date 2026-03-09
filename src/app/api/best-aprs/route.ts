@@ -272,14 +272,12 @@ const UPSHIFT_VAULTS_ONCHAIN = [
     address: '0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA',
     tokens: ['AUSD', 'USDC'],
     isStable: true,
-    fallbackApr: 9.5323,   // 10% APY → APR, used if on-chain delta unavailable
   },
   {
     name: 'earnMON Vault',
     address: '0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C',
     tokens: ['WMON', 'MVT'],
     isStable: false,
-    fallbackApr: 13.1052,  // 14% APY → APR
   },
 ]
 
@@ -414,7 +412,7 @@ async function getVaultApr(vault: string, currentBlock: number): Promise<number>
   return 0
 }
 
-interface VaultMeta { name: string; address: string; tokens: string[]; isStable: boolean; fallbackApr?: number }
+interface VaultMeta { name: string; address: string; tokens: string[]; isStable: boolean }
 
 async function fetchERC4626Vaults<T extends VaultMeta>(
   vaults: T[],
@@ -426,7 +424,7 @@ async function fetchERC4626Vaults<T extends VaultMeta>(
 
     return vaults
       .map((v, i) => {
-        const apr = aprs[i] > 0 ? aprs[i] : (v.fallbackApr ?? 0)
+        const apr = aprs[i]
         if (apr < 0.01) return null
         return { ...toEntry(v, apr), apr } as AprEntry
       })
@@ -440,9 +438,8 @@ async function fetchMagmaOnchain(): Promise<any> {
     const GMON = '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081'
     const currentBlock = await getBlockNumber()
     const apr = await getVaultApr(GMON, currentBlock)
-    // Fallback: 39% APY → 32.95% APR if on-chain calculation fails
-    return { apr: apr > 0 ? apr : 32.9452 }
-  } catch { return { apr: 32.9452 } }
+    return apr > 0 ? { apr } : null
+  } catch { return null }
 }
 
 // ─── KINTSU, MAGMA, shMONAD — LST staking vaults (parallel) ─────────────────
@@ -624,11 +621,8 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
 // API: https://kintsu.xyz/api/vaults/get-vault?address=<vault>
 // historical_apy values are decimals (0.088 = 8.8% APY). Use 30d if available,
 // else 7d. Convert APY → APR with daily compounding.
-// Falls back to static snapshot if the API is unreachable.
 
 const KINTSU_VAULT_ADDRESS = '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'
-const KINTSU_FALLBACK_APR  = 8.5044  // 30d APY 8.875% → APR, updated 2026-03-09
-
 async function fetchKintsuVault(): Promise<AprEntry[]> {
   try {
     const res = await fetch(
@@ -647,10 +641,8 @@ async function fetchKintsuVault(): Promise<AprEntry[]> {
         return [buildKintsuEntry(apr)]
       }
     }
-  } catch { /* fall through to static */ }
-
-  // Static fallback
-  return [buildKintsuEntry(KINTSU_FALLBACK_APR)]
+  } catch { /* ignore */ }
+  return []
 }
 
 function buildKintsuEntry(apr: number): AprEntry {
@@ -670,51 +662,59 @@ function buildKintsuEntry(apr: number): AprEntry {
 // supplyRate read on-chain: IPoolV3.supplyRate() selector 0x6f307dc3 (no args)
 // Returns RAY (1e27 per second). APR = rate / 1e27 * SECONDS_PER_YEAR * 100
 
+// ─── GEARBOX V3 — lending pools via MarketCompressor ─────────────────────────
+// MarketCompressor returns full pool state including supplyRate (RAY = 1e27/s).
+// Selector: getPoolsV3List(address[]) → 0x?? — we use getPools() on compressor.
+// APR = supplyRate_RAY / 1e27 * SECONDS_PER_YEAR * 100
+
+const GEARBOX_MARKET_COMPRESSOR = '0x70F1753a765C4df582FFA3B8d96AB492714E8992'
+
 const GEARBOX_POOL_LIST = [
-  { name: 'Magma MON',           symbol: 'dWMON-V3-1', addr: '0x09cA6b76276eC0682adb896418b99CB7E44a58A0', token: 'WMON',  isStable: false },
-  { name: 'EDGE UltraYield USDC', symbol: 'edgeUSDC',   addr: '0x6B343F7B797f1488AA48C49d540690F2b2c89751', token: 'USDC',  isStable: true  },
-  { name: 'EDGE UltraYield AUSD', symbol: 'edgeAUSD',   addr: '0xc4173359087CE643235420b7bC610d9B0CF2B82D', token: 'AUSD',  isStable: true  },
-  { name: 'EDGE UltraYield USDT', symbol: 'edgeUSDT',   addr: '0x164A35F31e4E0F6c45D500962a6978D2cbD5a16b', token: 'USDT',  isStable: true  },
-  { name: 'Kintsu MON',           symbol: 'dWMON-V3-0', addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689', token: 'WMON',  isStable: false },
+  { name: 'Magma MON',            addr: '0x09cA6b76276eC0682adb896418b99CB7E44a58A0', token: 'WMON', isStable: false },
+  { name: 'EDGE UltraYield USDC', addr: '0x6B343F7B797f1488AA48C49d540690F2b2c89751', token: 'USDC', isStable: true  },
+  { name: 'EDGE UltraYield AUSD', addr: '0xc4173359087CE643235420b7bC610d9B0CF2B82D', token: 'AUSD', isStable: true  },
+  { name: 'EDGE UltraYield USDT', addr: '0x164A35F31e4E0F6c45D500962a6978D2cbD5a16b', token: 'USDT', isStable: true  },
+  { name: 'Kintsu MON',           addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689', token: 'WMON', isStable: false },
 ]
 
-// GearBox V3 PoolV3 ABI selectors:
-//   supplyRate()             → 0x6f307dc3  (returns uint256 in RAY = 1e27/sec)
-//   baseInterestRate()       → 0xb80777ea  (fallback if supplyRate fails)
-// APR = rate_RAY / 1e27 * SECONDS_PER_YEAR * 100
+const SECONDS_PER_YEAR = 365 * 24 * 3600
 
-async function callGearboxPool(addr: string, selector: string): Promise<bigint> {
-  const res = await fetch(MONAD_RPC, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0', id: 1,
-      method: 'eth_call',
-      params: [{ to: addr, data: selector }, 'latest'],
-    }),
-    signal: AbortSignal.timeout(6_000),
-  }).then(r => r.json())
-  const hex = res?.result ?? '0x0'
-  if (!hex || hex === '0x' || hex === '0x0') return 0n
-  return BigInt(hex)
+// Try multiple known selectors for per-second interest rate in RAY
+// baseInterestRate() keccak: 0xb80777ea
+// supplyRate()       keccak: 0x6f307dc3 (unverified)
+// linearCumulative_RAY() not useful (cumulative, not rate)
+const GEARBOX_RATE_SELECTORS = ['0xb80777ea', '0x6f307dc3']
+
+async function getGearboxPoolApr(addr: string): Promise<number> {
+  for (const selector of GEARBOX_RATE_SELECTORS) {
+    try {
+      const res = await fetch(MONAD_RPC, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1, method: 'eth_call',
+          params: [{ to: addr, data: selector }, 'latest'],
+        }),
+        signal: AbortSignal.timeout(5_000),
+      }).then(r => r.json())
+      const hex = res?.result ?? ''
+      if (!hex || hex === '0x' || hex === '0x0' || hex.length < 10) continue
+      const rateRay = BigInt(hex)
+      if (rateRay === 0n) continue
+      const apr = Number(rateRay) / 1e27 * SECONDS_PER_YEAR * 100
+      if (apr > 0.01 && apr < 500) return apr
+    } catch { continue }
+  }
+  return 0
 }
 
 async function fetchGearbox(): Promise<AprEntry[]> {
-  const SECONDS_PER_YEAR = 365 * 24 * 3600
-  // Use rpcBatch for efficiency — results are indexed by position (results[i])
-  const calls = GEARBOX_POOL_LIST.map((p, i) =>
-    ethCall(p.addr, '0x6f307dc3', i)
-  )
   try {
-    const results = await rpcBatch(calls)
+    const aprs = await Promise.all(GEARBOX_POOL_LIST.map(p => getGearboxPoolApr(p.addr)))
     const out: AprEntry[] = []
     for (let i = 0; i < GEARBOX_POOL_LIST.length; i++) {
       const p = GEARBOX_POOL_LIST[i]
-      const hex = results[i]?.result ?? '0x0'
-      if (!hex || hex === '0x' || hex === '0x0') continue
-      let rateRay: bigint
-      try { rateRay = BigInt(hex) } catch { continue }
-      const apr = Number(rateRay) / 1e27 * SECONDS_PER_YEAR * 100
+      const apr = aprs[i]
       if (apr < 0.01) continue
       out.push({
         protocol: 'GearBox V3',
