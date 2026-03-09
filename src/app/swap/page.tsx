@@ -810,26 +810,65 @@ export default function SwapPage() {
     setTxStatus('idle'); setTxError(null)
     try {
       const recv = receiver.trim() || address
-      // Fetch tx data first (determines if approval is needed) before changing status
+
+      // Step 1: For ERC-20 tokens, check and approve allowance BEFORE calling Rubic swap
+      // Rubic validates allowance server-side — if insufficient it returns 400 (code 3001)
+      if (fromToken.address !== NATIVE) {
+        setTxStatus('approving')
+        // Read on-chain allowance for the Rubic router
+        const RUBIC_ROUTER = '0x3335733c454805df6a77f825f266e136FB4a3333'
+        const allowanceData = encodeFunctionData({
+          abi: [{
+            name: 'allowance', type: 'function', stateMutability: 'view',
+            inputs: [{ name: 'owner', type: 'address' }, { name: 'spender', type: 'address' }],
+            outputs: [{ name: '', type: 'uint256' }],
+          }] as const,
+          functionName: 'allowance',
+          args: [address as `0x${string}`, RUBIC_ROUTER as `0x${string}`],
+        })
+        const requiredAmount = parseSwapAmount(amount, fromToken.decimals)
+
+        // Fetch allowance via RPC
+        let currentAllowance = 0n
+        try {
+          const rpcUrl = CHAIN_RPC[fromChain.name] ?? 'https://rpc.monad.xyz'
+          const rpcRes = await fetch(rpcUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0', id: 1, method: 'eth_call',
+              params: [{ to: fromToken.address, data: allowanceData }, 'latest'],
+            }),
+          })
+          const rpcJson = await rpcRes.json()
+          if (rpcJson.result && rpcJson.result !== '0x') {
+            currentAllowance = BigInt(rpcJson.result)
+          }
+        } catch { /* assume 0 allowance */ }
+
+        if (currentAllowance < requiredAmount) {
+          await sendTransactionAsync({
+            to: fromToken.address as `0x${string}`,
+            data: encodeFunctionData({
+              abi: ERC20_APPROVE_ABI, functionName: 'approve',
+              args: [RUBIC_ROUTER as `0x${string}`, requiredAmount],
+            }),
+          })
+          // Wait a moment for the approval to propagate
+          await new Promise(r => setTimeout(r, 2000))
+        }
+      }
+
+      // Step 2: Now fetch swap tx (Rubic will see the allowance)
       setTxStatus('swapping')
       const { transaction } = await fetchSwapTx(
         fromChain.name, fromToken, amount,
         toChain.name, toToken,
         address, quote.id, recv,
       )
-      if (transaction.approvalAddress && fromToken.address !== NATIVE) {
-        setTxStatus('approving')
-        await sendTransactionAsync({
-          to: fromToken.address as `0x${string}`,
-          data: encodeFunctionData({
-            abi: ERC20_APPROVE_ABI, functionName: 'approve',
-            // Fix #6 (ALTO): Approve only the exact swap amount + 0.5% buffer,
-            // not MAX_UINT256. This limits exposure if the contract is later exploited.
-            args: [transaction.approvalAddress as `0x${string}`,
-              parseSwapAmount(amount, fromToken.decimals)],
-          }),
-        })
-        setTxStatus('swapping')
+      // Approval already handled above — validate and execute swap tx
+      if (!validateRubicTransaction(transaction, amount, fromToken.decimals)) {
+        throw new Error('Suspicious transaction — rejected for your safety')
       }
       const hash = await sendTransactionAsync({
         to:    transaction.to as `0x${string}`,
