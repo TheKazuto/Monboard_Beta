@@ -260,23 +260,36 @@ async function fetchCurve(): Promise<AprEntry[]> {
 }
 
 // ─── UPSHIFT — AUSD vault ─────────────────────────────────────────────────────
+// ─── UPSHIFT — vaults (Monad only) ───────────────────────────────────────────
 async function fetchUpshift(): Promise<AprEntry[]> {
   try {
-    const res = await fetch('https://app.upshift.finance/api/vaults?chainId=143', {
-      signal: AbortSignal.timeout(8_000), cache: 'no-store',
+    const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
+      signal: AbortSignal.timeout(10_000), cache: 'no-store',
     })
     if (!res.ok) return []
     const data = await res.json()
-    const vaults: any[] = data?.vaults ?? data ?? []
+    const vaults: any[] = data?.data ?? []
     return vaults
-      .filter((v: any) => Number(v.apy ?? v.apr ?? 0) > 0)
+      .filter((v: any) =>
+        v.chainId === 143 &&
+        v.isVisible === true &&
+        v.status === 'active' &&
+        typeof v.apy?.apy === 'number' &&
+        v.apy.apy > 0
+      )
       .map((v: any) => {
-        const sym = v.asset ?? v.underlyingSymbol ?? 'AUSD'
-        const apr = Number(v.apy ?? v.apr ?? 0) * (v.apy < 2 ? 100 : 1)
+        const tokens: string[] = (v.depositAssets ?? []).map((a: any) => a.symbol).filter(Boolean)
+        const apr = v.apy.apy // already in percent (e.g. 14 = 14%)
+        const vaultUrl = `https://app.upshift.finance/vaults/${v.address}`
         return {
-          protocol: 'Upshift', logo: '🔺', url: 'https://app.upshift.finance',
-          tokens: [sym], label: v.name ?? `${sym} Vault`,
-          apr, type: 'vault' as const, isStable: isStable(sym),
+          protocol: 'Upshift',
+          logo: '/logos/upshift.png',
+          url: vaultUrl,
+          tokens,
+          label: v.name ?? (tokens[0] ? `${tokens[0]} Vault` : 'Upshift Vault'),
+          apr,
+          type: 'vault' as const,
+          isStable: allStable(tokens),
         }
       })
   } catch { return [] }
