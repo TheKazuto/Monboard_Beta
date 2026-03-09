@@ -881,17 +881,54 @@ export default function SwapPage() {
       let cancelled = false
       const stopPoll = () => { cancelled = true; if (pollTimer) clearTimeout(pollTimer) }
       pollCleanupRef.current = stopPoll
+
+      const checkReceipt = async (): Promise<'success' | 'reverted' | null> => {
+        try {
+          const rpcUrl = CHAIN_RPC[fromChain.name] ?? 'https://rpc.monad.xyz'
+          const r = await fetch(rpcUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt',
+              params: [hash],
+            }),
+          })
+          const json = await r.json()
+          const receipt = json?.result
+          if (!receipt) return null // not mined yet
+          // status "0x1" = success, "0x0" = reverted
+          return receipt.status === '0x1' ? 'success' : 'reverted'
+        } catch { return null }
+      }
+
       const poll = async () => {
         if (cancelled) return
         try {
-          const r = await fetch(`https://api-v2.rubic.exchange/api/info/status?srcTxHash=${hash}`)
-          const d = await r.json()
-          if (d.status === 'SUCCESS') { setTxStatus('success'); return }
-          if (['FAIL','REVERT','REVERTED'].includes(d.status)) {
+          // For same-chain swaps, check receipt directly (Rubic status API doesn't track these reliably)
+          const receiptStatus = await checkReceipt()
+          if (receiptStatus === 'success') { setTxStatus('success'); return }
+          if (receiptStatus === 'reverted') {
             setTxStatus('error'); setTxError('Transaction reverted on-chain'); return
           }
+
+          // Also check Rubic status (mainly useful for cross-chain)
+          const isCross = fromChain.name !== toChain.name
+          if (isCross) {
+            const r = await fetch(`https://api-v2.rubic.exchange/api/info/status?srcTxHash=${hash}`)
+            const d = await r.json()
+            if (d.status === 'SUCCESS') { setTxStatus('success'); return }
+            if (['FAIL','REVERT','REVERTED'].includes(d.status)) {
+              setTxStatus('error'); setTxError('Transaction reverted on-chain'); return
+            }
+          }
         } catch {}
-        if (!cancelled && attempts++ < 40) pollTimer = setTimeout(poll, 5000)
+        if (!cancelled && attempts++ < 60) pollTimer = setTimeout(poll, 3000)
+        else if (!cancelled) {
+          // After max attempts, check receipt one last time
+          const finalStatus = await checkReceipt()
+          if (finalStatus === 'success') setTxStatus('success')
+          else setTxStatus('error')
+        }
       }
       poll()
     } catch (e: any) {
