@@ -713,7 +713,11 @@ export default function SwapPage() {
     const isNative = fromToken.address === NATIVE
     const buffer = isNative ? (CHAIN_GAS_BUFFER[fromChain.name] ?? 0.002) : 0
     const maxAmt = Math.max(0, fromBalance - buffer)
-    setAmount(maxAmt > 0 ? maxAmt.toString() : '')
+    if (maxAmt <= 0) { setAmount(''); return }
+    // Truncate to token decimals (avoid float precision exceeding real balance)
+    const dec = Math.min(fromToken.decimals ?? 18, 8) // cap display at 8 decimals
+    const truncated = Math.floor(maxAmt * Math.pow(10, dec)) / Math.pow(10, dec)
+    setAmount(truncated > 0 ? truncated.toString() : '')
   }
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { sendTransactionAsync } = useSendTransaction()
