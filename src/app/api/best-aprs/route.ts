@@ -368,55 +368,9 @@ async function fetchLSTVaults(): Promise<AprEntry[]> {
     fetch('https://api.kintsu.xyz/v1/apr?chainId=143', {
       signal: AbortSignal.timeout(6_000), cache: 'no-store',
     }).then(r => r.ok ? r.json() : null),
-    // Try multiple known Magma API patterns
-    (async () => {
-      const MAGMA_APIS = [
-        'https://api.magmastaking.xyz/v1/apr',
-        'https://api.magmastaking.xyz/v1/stats',
-        'https://api.magmastaking.xyz/apr',
-      ]
-      for (const url of MAGMA_APIS) {
-        try {
-          const r = await fetch(url, { signal: AbortSignal.timeout(5_000), cache: 'no-store' })
-          if (r.ok) { const d = await r.json(); if (d) return d }
-        } catch { /* try next */ }
-      }
-      // No API worked — derive APR on-chain from gMON vault pricePerShare delta
-      // gMON vault: ERC4626, convertToAssets selector = 0x07a2d13a
-      // Compare current block vs ~7 days ago (~7*24*3600/0.5 = 1_209_600 blocks on Monad)
-      try {
-        const GMON_VAULT = '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081'
-        const callData = '0x07a2d13a' + '0000000000000000000000000000000000000000000000000de0b6b3a7640000' // 1e18
-        // Get current block, then fetch pricePerShare at current and ~7d ago
-        const blockNowRes = await fetch(MONAD_RPC, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
-          signal: AbortSignal.timeout(4_000),
-        }).then(r => r.json())
-        const currentBlock = parseInt(blockNowRes?.result ?? '0x0', 16)
-        const pastBlock = Math.max(1, currentBlock - 1_200_000) // ~7d back at ~0.5s blocks/s
-        const [nowRes, pastRes] = await Promise.all([
-          fetch(MONAD_RPC, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_call', params: [{ to: GMON_VAULT, data: callData }, 'latest'] }),
-            signal: AbortSignal.timeout(6_000),
-          }).then(r => r.json()),
-          fetch(MONAD_RPC, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'eth_call', params: [{ to: GMON_VAULT, data: callData }, '0x' + pastBlock.toString(16)] }),
-            signal: AbortSignal.timeout(6_000),
-          }).then(r => r.json()),
-        ])
-        const ppsNow  = BigInt(nowRes?.result  ?? '0x0')
-        const ppsPast = BigInt(pastRes?.result ?? '0x0')
-        if (ppsPast > 0n && ppsNow > ppsPast) {
-          const growthPerDay = Number(ppsNow - ppsPast) / Number(ppsPast) / 7
-          const aprPct = growthPerDay * 365 * 100
-          if (aprPct > 0 && aprPct < 200) return { apr: aprPct, source: 'onchain' }
-        }
-      } catch { /* ignore */ }
-      return null
-    })(),
+    // Magma has no public API — APR sourced from app (39% APY → 32.95% APR)
+    // Updated: 2026-03-09. TODO: replace with on-chain calc when RPC is stable.
+    Promise.resolve({ apr: 32.9452 }),
     fetch('https://api.shmonad.xyz/v1/apr', {
       signal: AbortSignal.timeout(6_000), cache: 'no-store',
     }).then(r => r.ok ? r.json() : null),
