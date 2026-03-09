@@ -261,64 +261,44 @@ async function fetchCurve(): Promise<AprEntry[]> {
 
 // ─── UPSHIFT — AUSD vault ─────────────────────────────────────────────────────
 // ─── UPSHIFT — vaults (Monad only) ───────────────────────────────────────────
-// APY field is already in percent (e.g. 14 = 14% APY). Must convert to APR.
-// Filter: chainId 143, active, apy.apy > 0, exclude obvious test vaults.
-const TEST_VAULT_NAMES = /test|testing/i
+// ─── UPSHIFT — vaults (Monad, chainId 143) ──────────────────────────────────
+// Static snapshot — /api/proxy/vaults is a Next.js internal proxy, not
+// accessible server-side. Update this list when new vaults go live.
+// APRs derived from APY using daily compounding: APR = 365 * ((1+APY)^(1/365) - 1)
 
-async function fetchUpshift(): Promise<AprEntry[]> {
-  // /api/proxy/vaults is a Next.js server-side proxy — needs browser-like headers
-  const UPSHIFT_URLS = [
-    'https://app.upshift.finance/api/proxy/vaults',
-    'https://app.upshift.finance/api/vaults',
-  ]
-  const headers = {
-    'Origin':  'https://app.upshift.finance',
-    'Referer': 'https://app.upshift.finance/vaults',
-    'Accept':  'application/json',
-  }
-  try {
-    let vaults: any[] = []
-    for (const url of UPSHIFT_URLS) {
-      try {
-        const res = await fetch(url, {
-          headers, signal: AbortSignal.timeout(10_000), cache: 'no-store',
-        })
-        if (!res.ok) continue
-        const data = await res.json()
-        // Handle both { data: [...] } and bare array responses
-        const arr = Array.isArray(data) ? data : (data?.data ?? data?.vaults ?? [])
-        if (arr.length > 0) { vaults = arr; break }
-      } catch { continue }
-    }
-    if (!vaults.length) return []
-    return vaults
-      .filter((v: any) =>
-        v.chainId === 143 &&
-        v.status === 'active' &&
-        typeof v.apy?.apy === 'number' &&
-        v.apy.apy > 0 &&
-        !TEST_VAULT_NAMES.test(v.name ?? '')
-      )
-      .map((v: any) => {
-        const tokens: string[] = (v.depositAssets ?? []).map((a: any) => a.symbol).filter(Boolean)
-        // Convert APY (%) to APR (%) using daily compounding
-        const apyDecimal = v.apy.apy / 100
-        const apr = 365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100
-        const vaultUrl = `https://app.upshift.finance/vaults/${v.address}`
-        return {
-          protocol: 'Upshift',
-          logo: '/logos/upshift.png',
-          url: vaultUrl,
-          tokens,
-          label: v.name ?? (tokens[0] ? `${tokens[0]} Vault` : 'Upshift Vault'),
-          apr,
-          type: 'vault' as const,
-          isStable: allStable(tokens),
-        }
-      })
-  } catch { return [] }
+interface UpshiftVaultData {
+  name:     string
+  address:  string
+  tokens:   string[]
+  apr:      number   // already converted from APY
+  isStable: boolean
 }
 
+const UPSHIFT_VAULTS: UpshiftVaultData[] = [
+  // earnAUSD — 10% APY → 9.53% APR | AUSD/USDC stable | updated 2026-03-09
+  {
+    name: 'earnAUSD', address: '0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA',
+    tokens: ['AUSD', 'USDC'], apr: 9.5323, isStable: true,
+  },
+  // earnMON Vault — 14% APY → 13.11% APR | WMON/MVT non-stable | updated 2026-03-09
+  {
+    name: 'earnMON Vault', address: '0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C',
+    tokens: ['WMON', 'MVT'], apr: 13.1052, isStable: false,
+  },
+]
+
+function fetchUpshift(): AprEntry[] {
+  return UPSHIFT_VAULTS.map(v => ({
+    protocol: 'Upshift',
+    logo:     '/logos/upshift.png',
+    url:      `https://app.upshift.finance/vaults/${v.address}`,
+    tokens:   v.tokens,
+    label:    v.name,
+    apr:      v.apr,
+    type:     'vault' as const,
+    isStable: v.isStable,
+  }))
+}
 // ─── LAGOON — vaults ──────────────────────────────────────────────────────────
 async function fetchLagoon(): Promise<AprEntry[]> {
   try {
@@ -651,13 +631,12 @@ function fetchGearbox(): AprEntry[] {
 
 // ─── Fetch all data (used by cache) ──────────────────────────────────────────
 async function fetchAllData() {
-  const [morphoR, neverlandR, eulerR, curveR, upshiftR, lagoonR, kuruR, lstR, uniR, pancakeR] =
+  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR] =
     await Promise.allSettled([
       fetchMorpho(),
       fetchNeverland(),
       fetchEulerV2(),
       fetchCurve(),
-      fetchUpshift(),
       fetchLagoon(),
       fetchKuru(),
       fetchLSTVaults(),
@@ -674,7 +653,6 @@ async function fetchAllData() {
     ...unwrap(neverlandR),
     ...unwrap(eulerR),
     ...unwrap(curveR),
-    ...unwrap(upshiftR),
     ...unwrap(lagoonR),
     ...unwrap(kuruR),
     ...unwrap(lstR),
@@ -682,6 +660,7 @@ async function fetchAllData() {
     ...unwrap(pancakeR),
     ...getMidas(),
     ...fetchGearbox(),
+    ...fetchUpshift(),   // static snapshot — synchronous
   ].filter(e => e.apr > 0)
 
   const byApr = (a: AprEntry, b: AprEntry) => b.apr - a.apr
