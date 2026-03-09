@@ -366,27 +366,26 @@ const FEE_PARTS = FEE_RECEIVER ? { fee: FEE_PERCENT, feeTarget: FEE_RECEIVER } :
 // Builds the common fields shared by both quoteBest and swap endpoints
 function buildRubicBody(
   srcChain: string, srcToken: Token, srcAmount: string,
-  dstChain: string, dstToken: Token,
+  dstChain: string, dstToken: Token, slippageTolerance: number,
 ) {
-  const isCross = srcChain !== dstChain
   return {
     srcTokenAddress: srcToken.address, srcTokenBlockchain: srcChain,
     srcTokenAmount: srcAmount,
     dstTokenAddress: dstToken.address, dstTokenBlockchain: dstChain,
     referrer: REFERRER,
     ...FEE_PARTS,
-    slippageTolerance: isCross ? SLIPPAGE_CROSS : SLIPPAGE_ON_CHAIN,
+    slippageTolerance,
   }
 }
 
 async function fetchQuote(
   srcChain: string, srcToken: Token, srcAmount: string,
-  dstChain: string, dstToken: Token,
+  dstChain: string, dstToken: Token, slippageTolerance: number,
 ): Promise<Quote> {
   const res = await fetch('https://api-v2.rubic.exchange/api/routes/quoteBest', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(buildRubicBody(srcChain, srcToken, srcAmount, dstChain, dstToken)),
+    body: JSON.stringify(buildRubicBody(srcChain, srcToken, srcAmount, dstChain, dstToken, slippageTolerance)),
   })
   if (!res.ok) throw new Error(`${res.status}`)
   return res.json()
@@ -396,12 +395,13 @@ async function fetchSwapTx(
   srcChain: string, srcToken: Token, srcAmount: string,
   dstChain: string, dstToken: Token,
   fromAddress: string, quoteId: string, receiver: string,
+  slippageTolerance: number,
 ) {
   const res = await fetch('https://api-v2.rubic.exchange/api/routes/swap', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      ...buildRubicBody(srcChain, srcToken, srcAmount, dstChain, dstToken),
+      ...buildRubicBody(srcChain, srcToken, srcAmount, dstChain, dstToken, slippageTolerance),
       fromAddress, id: quoteId, receiver,
     }),
   })
@@ -629,6 +629,8 @@ export default function SwapPage() {
   const [toToken,   setToToken]   = useState<Token>(USDC_MONAD)
   const [amount,    setAmount]    = useState('')
   const [receiver,  setReceiver]  = useState('')
+  const [slippage,  setSlippage]  = useState(SLIPPAGE_ON_CHAIN) // user-configurable
+  const [showSlippage, setShowSlippage] = useState(false)
 
   const [quote,        setQuote]        = useState<Quote | null>(null)
   const [quoteLoading, setQuoteLoading] = useState(false)
@@ -743,12 +745,12 @@ export default function SwapPage() {
     if (!amt || isNaN(Number(amt)) || Number(amt) <= 0) { setQuote(null); return }
     setQuoteLoading(true); setQuoteError(null)
     try {
-      setQuote(await fetchQuote(fromChain.name, fromToken, amt, toChain.name, toToken))
+      setQuote(await fetchQuote(fromChain.name, fromToken, amt, toChain.name, toToken, slippage))
     } catch {
       setQuoteError('No route found for this pair')
       setQuote(null)
     } finally { setQuoteLoading(false) }
-  }, [fromChain, fromToken, toChain, toToken])
+  }, [fromChain, fromToken, toChain, toToken, slippage])
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -864,7 +866,7 @@ export default function SwapPage() {
       const { transaction } = await fetchSwapTx(
         fromChain.name, fromToken, amount,
         toChain.name, toToken,
-        address, quote.id, recv,
+        address, quote.id, recv, slippage,
       )
       // Approval already handled above — validate and execute swap tx
       if (!validateRubicTransaction(transaction, amount, fromToken.decimals)) {
@@ -1105,12 +1107,6 @@ export default function SwapPage() {
                 <span className={`text-xs font-medium ${quoteAge > 45 ? 'text-amber-500' : 'text-gray-500'}`}>{Math.max(0, 60 - quoteAge)}s</span>
               </div>
             )}
-            {quote.estimate.durationInMinutes && (
-              <div className="flex justify-between px-4 py-2.5">
-                <span className="text-gray-500">Estimated time</span>
-                <span className="font-medium text-gray-700">~{quote.estimate.durationInMinutes} min</span>
-              </div>
-            )}
             {quote.estimate.priceImpact !== null && (
               <div className="flex justify-between px-4 py-2.5">
                 <span className="text-gray-500">Price impact</span>
@@ -1125,9 +1121,58 @@ export default function SwapPage() {
                 <span className="font-medium text-gray-700">${quote.fees.gasTokenFees.protocol.fixedUsdAmount.toFixed(2)}</span>
               </div>
             )}
-            <div className="flex justify-between px-4 py-2.5">
+            <div className="flex justify-between items-center px-4 py-2.5 relative">
               <span className="text-gray-500">Slippage tolerance</span>
-              <span className="font-medium text-gray-700">{isCrossChain ? SLIPPAGE_CROSS : SLIPPAGE_ON_CHAIN}%</span>
+              <button
+                onClick={() => setShowSlippage(s => !s)}
+                className="font-medium text-violet-600 hover:text-violet-800 underline decoration-dotted underline-offset-2 transition-colors"
+              >
+                {slippage}%
+              </button>
+              {showSlippage && (
+                <div className="absolute right-4 top-10 z-20 bg-white border border-violet-200 rounded-xl shadow-lg p-3 flex flex-col gap-2 min-w-[180px]">
+                  <p className="text-xs font-semibold text-gray-600 mb-1">Set slippage</p>
+                  <div className="flex gap-1.5">
+                    {[0.5, 1, 2, 3, 5].map(v => (
+                      <button
+                        key={v}
+                        onClick={() => { setSlippage(v); setShowSlippage(false) }}
+                        className={`flex-1 text-xs font-semibold py-1.5 rounded-lg border transition-all ${
+                          slippage === v
+                            ? 'bg-violet-600 text-white border-violet-600'
+                            : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-violet-300'
+                        }`}
+                      >
+                        {v}%
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={50}
+                      step={0.1}
+                      value={slippage}
+                      onChange={e => {
+                        const v = parseFloat(e.target.value)
+                        if (!isNaN(v) && v > 0 && v <= 50) setSlippage(v)
+                      }}
+                      className="flex-1 text-xs px-2 py-1.5 border border-gray-200 rounded-lg text-center focus:outline-none focus:border-violet-300"
+                    />
+                    <span className="text-xs text-gray-400">%</span>
+                    <button
+                      onClick={() => setShowSlippage(false)}
+                      className="text-xs font-semibold text-violet-600 hover:text-violet-800"
+                    >
+                      Done
+                    </button>
+                  </div>
+                  {slippage > 5 && (
+                    <p className="text-xs text-amber-500 mt-0.5">High slippage may result in unfavorable rates</p>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex justify-between px-4 py-2.5">
               <span className="text-gray-500">Route</span>
