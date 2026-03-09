@@ -658,73 +658,56 @@ function buildKintsuEntry(apr: number): AprEntry {
   }
 }
 
-// ─── GEARBOX V3 — lending pools (supply APR) ────────────────────────────────
-// supplyRate read on-chain: IPoolV3.supplyRate() selector 0x6f307dc3 (no args)
-// Returns RAY (1e27 per second). APR = rate / 1e27 * SECONDS_PER_YEAR * 100
+// ─── GEARBOX V3 — lending pools ──────────────────────────────────────────────
+// Source: static JSON updated by GearBox with each deployment.
+// supplyRate is already annualised in RAY (1e27). APR = supplyRate / 1e27 * 100.
 
-// ─── GEARBOX V3 — lending pools via MarketCompressor ─────────────────────────
-// MarketCompressor returns full pool state including supplyRate (RAY = 1e27/s).
-// Selector: getPoolsV3List(address[]) → 0x?? — we use getPools() on compressor.
-// APR = supplyRate_RAY / 1e27 * SECONDS_PER_YEAR * 100
-
-const GEARBOX_MARKET_COMPRESSOR = '0x70F1753a765C4df582FFA3B8d96AB492714E8992'
+const GEARBOX_STATIC_URL = 'https://static.gearbox.finance/client-v3/configs/pools/pools.json'
 
 const GEARBOX_POOL_LIST = [
-  { name: 'Magma MON',            addr: '0x09cA6b76276eC0682adb896418b99CB7E44a58A0', token: 'WMON', isStable: false },
-  { name: 'EDGE UltraYield USDC', addr: '0x6B343F7B797f1488AA48C49d540690F2b2c89751', token: 'USDC', isStable: true  },
-  { name: 'EDGE UltraYield AUSD', addr: '0xc4173359087CE643235420b7bC610d9B0CF2B82D', token: 'AUSD', isStable: true  },
-  { name: 'EDGE UltraYield USDT', addr: '0x164A35F31e4E0F6c45D500962a6978D2cbD5a16b', token: 'USDT', isStable: true  },
-  { name: 'Kintsu MON',           addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689', token: 'WMON', isStable: false },
+  { addr: '0x09cA6b76276eC0682adb896418b99CB7E44a58A0', token: 'WMON', isStable: false },
+  { addr: '0x6B343F7B797f1488AA48C49d540690F2b2c89751', token: 'USDC', isStable: true  },
+  { addr: '0xc4173359087CE643235420b7bC610d9B0CF2B82D', token: 'AUSD', isStable: true  },
+  { addr: '0x164A35F31e4E0F6c45D500962a6978D2cbD5a16b', token: 'USDT', isStable: true  },
+  { addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689', token: 'WMON', isStable: false },
 ]
-
-const SECONDS_PER_YEAR = 365 * 24 * 3600
-
-// Try multiple known selectors for per-second interest rate in RAY
-// baseInterestRate() keccak: 0xb80777ea
-// supplyRate()       keccak: 0x6f307dc3 (unverified)
-// linearCumulative_RAY() not useful (cumulative, not rate)
-const GEARBOX_RATE_SELECTORS = ['0xb80777ea', '0x6f307dc3']
-
-async function getGearboxPoolApr(addr: string): Promise<number> {
-  for (const selector of GEARBOX_RATE_SELECTORS) {
-    try {
-      const res = await fetch(MONAD_RPC, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0', id: 1, method: 'eth_call',
-          params: [{ to: addr, data: selector }, 'latest'],
-        }),
-        signal: AbortSignal.timeout(5_000),
-      }).then(r => r.json())
-      const hex = res?.result ?? ''
-      if (!hex || hex === '0x' || hex === '0x0' || hex.length < 10) continue
-      const rateRay = BigInt(hex)
-      if (rateRay === 0n) continue
-      const apr = Number(rateRay) / 1e27 * SECONDS_PER_YEAR * 100
-      if (apr > 0.01 && apr < 500) return apr
-    } catch { continue }
-  }
-  return 0
-}
 
 async function fetchGearbox(): Promise<AprEntry[]> {
   try {
-    const aprs = await Promise.all(GEARBOX_POOL_LIST.map(p => getGearboxPoolApr(p.addr)))
+    const res = await fetch(GEARBOX_STATIC_URL, {
+      signal: AbortSignal.timeout(8_000),
+      cache: 'no-store',
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    const markets: any[] = data?.markets ?? []
+
     const out: AprEntry[] = []
-    for (let i = 0; i < GEARBOX_POOL_LIST.length; i++) {
-      const p = GEARBOX_POOL_LIST[i]
-      const apr = aprs[i]
-      if (apr < 0.01) continue
+    for (const m of markets) {
+      const pool = m?.pool
+      if (!pool || pool.isPaused) continue
+
+      const addr: string = pool?.baseParams?.addr ?? ''
+      const meta = GEARBOX_POOL_LIST.find(p => p.addr.toLowerCase() === addr.toLowerCase())
+      if (!meta) continue
+
+      const supplyRayStr: string = pool?.supplyRate?.__value ?? '0'
+      const supplyRay = BigInt(supplyRayStr)
+      if (supplyRay === 0n) continue
+
+      // supplyRate is annualised in RAY (1e27)
+      const apr = Number(supplyRay) / 1e27 * 100
+      if (apr < 0.01 || apr > 500) continue
+
       out.push({
         protocol: 'GearBox V3',
         logo: '⚙️',
         url: 'https://app.gearbox.fi/pools?chainId=143',
-        tokens: [p.token],
-        label: p.name,
+        tokens: [meta.token],
+        label: pool.name ?? meta.token,
         apr,
         type: 'lend',
-        isStable: p.isStable,
+        isStable: meta.isStable,
       })
     }
     return out
