@@ -538,6 +538,52 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
+// ─── KINTSU — superMON vault ─────────────────────────────────────────────────
+// API: https://kintsu.xyz/api/vaults/get-vault?address=<vault>
+// historical_apy values are decimals (0.088 = 8.8% APY). Use 30d if available,
+// else 7d. Convert APY → APR with daily compounding.
+// Falls back to static snapshot if the API is unreachable.
+
+const KINTSU_VAULT_ADDRESS = '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'
+const KINTSU_FALLBACK_APR  = 8.5044  // 30d APY 8.875% → APR, updated 2026-03-09
+
+async function fetchKintsuVault(): Promise<AprEntry[]> {
+  try {
+    const res = await fetch(
+      `https://kintsu.xyz/api/vaults/get-vault?address=${KINTSU_VAULT_ADDRESS}`,
+      { signal: AbortSignal.timeout(10_000), cache: 'no-store' },
+    )
+    const json = res.ok ? await res.json() : null
+    const vault = json?.data ?? null
+
+    if (vault && vault.status === 'active') {
+      const hist = vault.historical_apy ?? {}
+      // Prefer 30d APY; fall back to 7d; values are decimals (e.g. 0.088)
+      const apyDecimal = hist['30'] ?? hist['7'] ?? null
+      if (typeof apyDecimal === 'number' && apyDecimal > 0) {
+        const apr = 365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100
+        return [buildKintsuEntry(apr)]
+      }
+    }
+  } catch { /* fall through to static */ }
+
+  // Static fallback
+  return [buildKintsuEntry(KINTSU_FALLBACK_APR)]
+}
+
+function buildKintsuEntry(apr: number): AprEntry {
+  return {
+    protocol: 'Kintsu',
+    logo: '🔷',
+    url: 'https://kintsu.xyz/vaults',
+    tokens: ['WMON'],
+    label: 'superMON Vault',
+    apr,
+    type: 'vault',
+    isStable: false,
+  }
+}
+
 // ─── GEARBOX V3 — lending pools (supply APR) ─────────────────────────────────
 // Data sourced from GearBox MarketCompressor on Monad (chainId 143).
 // supplyRate is in RAY (1e27). Static snapshot updated from on-chain scanner.
@@ -631,7 +677,7 @@ function fetchGearbox(): AprEntry[] {
 
 // ─── Fetch all data (used by cache) ──────────────────────────────────────────
 async function fetchAllData() {
-  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR] =
+  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR, kintsuVaultR] =
     await Promise.allSettled([
       fetchMorpho(),
       fetchNeverland(),
@@ -642,6 +688,7 @@ async function fetchAllData() {
       fetchLSTVaults(),
       fetchUniswap(),
       fetchPancakeswap(),
+      fetchKintsuVault(),
     ])
 
   function unwrap(r: PromiseSettledResult<AprEntry[]>): AprEntry[] {
@@ -661,6 +708,7 @@ async function fetchAllData() {
     ...getMidas(),
     ...fetchGearbox(),
     ...fetchUpshift(),   // static snapshot — synchronous
+    ...unwrap(kintsuVaultR),
   ].filter(e => e.apr > 0)
 
   const byApr = (a: AprEntry, b: AprEntry) => b.apr - a.apr
