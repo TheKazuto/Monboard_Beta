@@ -266,13 +266,31 @@ async function fetchCurve(): Promise<AprEntry[]> {
 const TEST_VAULT_NAMES = /test|testing/i
 
 async function fetchUpshift(): Promise<AprEntry[]> {
+  // /api/proxy/vaults is a Next.js server-side proxy — needs browser-like headers
+  const UPSHIFT_URLS = [
+    'https://app.upshift.finance/api/proxy/vaults',
+    'https://app.upshift.finance/api/vaults',
+  ]
+  const headers = {
+    'Origin':  'https://app.upshift.finance',
+    'Referer': 'https://app.upshift.finance/vaults',
+    'Accept':  'application/json',
+  }
   try {
-    const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
-    })
-    if (!res.ok) return []
-    const data = await res.json()
-    const vaults: any[] = data?.data ?? []
+    let vaults: any[] = []
+    for (const url of UPSHIFT_URLS) {
+      try {
+        const res = await fetch(url, {
+          headers, signal: AbortSignal.timeout(10_000), cache: 'no-store',
+        })
+        if (!res.ok) continue
+        const data = await res.json()
+        // Handle both { data: [...] } and bare array responses
+        const arr = Array.isArray(data) ? data : (data?.data ?? data?.vaults ?? [])
+        if (arr.length > 0) { vaults = arr; break }
+      } catch { continue }
+    }
+    if (!vaults.length) return []
     return vaults
       .filter((v: any) =>
         v.chainId === 143 &&
