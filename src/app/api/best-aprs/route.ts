@@ -261,6 +261,10 @@ async function fetchCurve(): Promise<AprEntry[]> {
 
 // ─── UPSHIFT — AUSD vault ─────────────────────────────────────────────────────
 // ─── UPSHIFT — vaults (Monad only) ───────────────────────────────────────────
+// APY field is already in percent (e.g. 14 = 14% APY). Must convert to APR.
+// Filter: chainId 143, active, apy.apy > 0, exclude obvious test vaults.
+const TEST_VAULT_NAMES = /test|testing/i
+
 async function fetchUpshift(): Promise<AprEntry[]> {
   try {
     const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
@@ -272,14 +276,16 @@ async function fetchUpshift(): Promise<AprEntry[]> {
     return vaults
       .filter((v: any) =>
         v.chainId === 143 &&
-        v.isVisible === true &&
         v.status === 'active' &&
         typeof v.apy?.apy === 'number' &&
-        v.apy.apy > 0
+        v.apy.apy > 0 &&
+        !TEST_VAULT_NAMES.test(v.name ?? '')
       )
       .map((v: any) => {
         const tokens: string[] = (v.depositAssets ?? []).map((a: any) => a.symbol).filter(Boolean)
-        const apr = v.apy.apy // already in percent (e.g. 14 = 14%)
+        // Convert APY (%) to APR (%) using daily compounding
+        const apyDecimal = v.apy.apy / 100
+        const apr = 365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100
         const vaultUrl = `https://app.upshift.finance/vaults/${v.address}`
         return {
           protocol: 'Upshift',
@@ -434,32 +440,41 @@ function parseUniPools(pools: any[], version: string): AprEntry[] {
 }
 
 async function fetchUniswap(): Promise<AprEntry[]> {
+  const GW = 'https://interface.gateway.uniswap.org/v1/graphql'
+  const headers = { 'Content-Type': 'application/json', 'Origin': 'https://app.uniswap.org' }
+
+  // Query V3 and V4 in one request; if GW rejects the combined query, each field is still optional
+  const query = `{
+    topV3Pools(chain: MONAD, first: 100) {
+      address feeTier
+      token0 { symbol }
+      token1 { symbol }
+      totalLiquidity { value }
+      cumulativeVolume(duration: DAY) { value }
+    }
+    topV4Pools(chain: MONAD, first: 100) {
+      poolId feeTier
+      token0 { symbol }
+      token1 { symbol }
+      totalLiquidity { value }
+      cumulativeVolume(duration: DAY) { value }
+    }
+  }`
+
   try {
-    const res = await fetch('https://interface.gateway.uniswap.org/v1/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Origin': 'https://app.uniswap.org' },
-      body: JSON.stringify({ query: `{
-        topV3Pools(chain: MONAD, first: 100) {
-          address feeTier
-          token0 { symbol }
-          token1 { symbol }
-          totalLiquidity { value }
-          cumulativeVolume(duration: DAY) { value }
-        }
-        topV4Pools(chain: MONAD, first: 100) {
-          poolId feeTier
-          token0 { symbol }
-          token1 { symbol }
-          totalLiquidity { value }
-          cumulativeVolume(duration: DAY) { value }
-        }
-      }` }),
+    const res = await fetch(GW, {
+      method: 'POST', headers,
+      body: JSON.stringify({ query }),
       signal: AbortSignal.timeout(15_000), cache: 'no-store',
     })
-    const data = await res.json()
+    if (!res.ok) return []
+    const json = await res.json()
+    // GraphQL may return partial data with errors — use whatever fields came back
+    const v3 = json?.data?.topV3Pools ?? []
+    const v4 = json?.data?.topV4Pools ?? []
     return [
-      ...parseUniPools(data?.data?.topV3Pools ?? [], 'V3'),
-      ...parseUniPools(data?.data?.topV4Pools ?? [], 'V4'),
+      ...parseUniPools(v3, 'V3'),
+      ...parseUniPools(v4, 'V4'),
     ]
   } catch { return [] }
 }
@@ -497,7 +512,8 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
     ])
     if (!poolsRes.ok) return []
     const data = await poolsRes.json()
-    const rows: any[] = data?.rows ?? []
+    // API may return { rows: [...] } or just an array, or { data: { rows: [...] } }
+    const rows: any[] = data?.rows ?? data?.data?.rows ?? (Array.isArray(data) ? data : [])
     const out: AprEntry[] = []
     for (const p of rows) {
       const tvl    = Number(p.tvlUSD ?? 0)
