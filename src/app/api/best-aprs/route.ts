@@ -387,37 +387,23 @@ async function fetchLSTVaults(): Promise<AprEntry[]> {
       try {
         const GMON_VAULT = '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081'
         const callData = '0x07a2d13a' + '0000000000000000000000000000000000000000000000000de0b6b3a7640000' // 1e18
-        const [latest, old7] = await Promise.all([
-          fetch(MONAD_RPC, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: GMON_VAULT, data: callData }, 'latest'] }),
-            signal: AbortSignal.timeout(6_000),
-          }).then(r => r.json()),
-          fetch(MONAD_RPC, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_call', params: [{ to: GMON_VAULT, data: callData }, { blockNumber: 'latest' }] }),
-            signal: AbortSignal.timeout(6_000),
-          }).then(r => r.json()),
-        ])
-        // Get block numbers to compute the delta window
-        const [blockNow, block7d] = await Promise.all([
-          fetch(MONAD_RPC, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'eth_blockNumber', params: [] }),
-            signal: AbortSignal.timeout(4_000),
-          }).then(r => r.json()),
-        ])
-        const currentBlock = parseInt(blockNow?.result ?? '0x0', 16)
-        const pastBlock = Math.max(1, currentBlock - 1_200_000) // ~7d back at ~0.5s blocks
+        // Get current block, then fetch pricePerShare at current and ~7d ago
+        const blockNowRes = await fetch(MONAD_RPC, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
+          signal: AbortSignal.timeout(4_000),
+        }).then(r => r.json())
+        const currentBlock = parseInt(blockNowRes?.result ?? '0x0', 16)
+        const pastBlock = Math.max(1, currentBlock - 1_200_000) // ~7d back at ~0.5s blocks/s
         const [nowRes, pastRes] = await Promise.all([
           fetch(MONAD_RPC, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'eth_call', params: [{ to: GMON_VAULT, data: callData }, 'latest'] }),
+            body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_call', params: [{ to: GMON_VAULT, data: callData }, 'latest'] }),
             signal: AbortSignal.timeout(6_000),
           }).then(r => r.json()),
           fetch(MONAD_RPC, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'eth_call', params: [{ to: GMON_VAULT, data: callData }, '0x' + pastBlock.toString(16)] }),
+            body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'eth_call', params: [{ to: GMON_VAULT, data: callData }, '0x' + pastBlock.toString(16)] }),
             signal: AbortSignal.timeout(6_000),
           }).then(r => r.json()),
         ])
