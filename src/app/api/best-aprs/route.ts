@@ -290,7 +290,7 @@ const UPSHIFT_VAULTS: UpshiftVaultData[] = [
 function fetchUpshift(): AprEntry[] {
   return UPSHIFT_VAULTS.map(v => ({
     protocol: 'Upshift',
-    logo:     '/logos/upshift.png',
+    logo:     '🔺',
     url:      `https://app.upshift.finance/vaults/${v.address}`,
     tokens:   v.tokens,
     label:    v.name,
