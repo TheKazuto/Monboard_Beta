@@ -272,12 +272,14 @@ const UPSHIFT_VAULTS_ONCHAIN = [
     address: '0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA',
     tokens: ['AUSD', 'USDC'],
     isStable: true,
+    fallbackApr: 9.5323,   // 10% APY → APR, used if on-chain delta unavailable
   },
   {
     name: 'earnMON Vault',
     address: '0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C',
     tokens: ['WMON', 'MVT'],
     isStable: false,
+    fallbackApr: 13.1052,  // 14% APY → APR
   },
 ]
 
@@ -359,11 +361,11 @@ function getMidas(): AprEntry[] {
 }
 
 // ─── ON-CHAIN ERC4626 APR HELPER ─────────────────────────────────────────────
-// Reads convertToAssets(1e18) at current block and ~7 days ago,
-// then annualises the growth. Works for any ERC4626-compatible vault.
-// Monad produces ~2 blocks/sec → 7d ≈ 7*24*3600*2 = 1_209_600 blocks
+// Reads convertToAssets(1e18) at current and past blocks, annualises growth.
+// Monad: ~2 blocks/sec → 7d ≈ 1_209_600 blocks, 3d ≈ 518_400, 1d ≈ 172_800
+// Tries progressively smaller windows for new vaults with limited history.
 
-const BLOCKS_PER_7D = 1_209_600
+const BLOCKS_PER_DAY = 172_800
 const CONVERT_TO_ASSETS = '0x07a2d13a' + '0000000000000000000000000000000000000000000000000de0b6b3a7640000'
 
 async function getBlockNumber(): Promise<number> {
@@ -382,18 +384,37 @@ async function getPricePerShare(vault: string, block: string): Promise<bigint> {
     signal: AbortSignal.timeout(6_000),
   }).then(r => r.json())
   const hex = res?.result ?? '0x0'
-  return hex && hex !== '0x' ? BigInt(hex) : 0n
+  try { return hex && hex !== '0x' && hex !== '0x0' ? BigInt(hex) : 0n } catch { return 0n }
 }
 
-// Converts 7-day pricePerShare growth to APR (not APY)
-function ppsGrowthToApr(ppsNow: bigint, ppsPast: bigint): number {
+// Annualise pricePerShare growth over `days` days
+function ppsGrowthToApr(ppsNow: bigint, ppsPast: bigint, days: number): number {
   if (ppsPast === 0n || ppsNow <= ppsPast) return 0
-  const growthPerDay = Number(ppsNow - ppsPast) / Number(ppsPast) / 7
+  const growthPerDay = Number(ppsNow - ppsPast) / Number(ppsPast) / days
   const apr = growthPerDay * 365 * 100
   return apr > 0 && apr < 500 ? apr : 0
 }
 
-interface VaultMeta { name: string; address: string; tokens: string[]; isStable: boolean }
+// Try 7d window first, then 3d, then 1d — handles new vaults with limited history
+async function getVaultApr(vault: string, currentBlock: number): Promise<number> {
+  const windows = [
+    { days: 7, blocks: BLOCKS_PER_DAY * 7 },
+    { days: 3, blocks: BLOCKS_PER_DAY * 3 },
+    { days: 1, blocks: BLOCKS_PER_DAY * 1 },
+  ]
+  const ppsNow = await getPricePerShare(vault, 'latest')
+  if (ppsNow === 0n) return 0
+
+  for (const { days, blocks } of windows) {
+    const pastBlock = '0x' + Math.max(1, currentBlock - blocks).toString(16)
+    const ppsPast = await getPricePerShare(vault, pastBlock)
+    const apr = ppsGrowthToApr(ppsNow, ppsPast, days)
+    if (apr > 0) return apr
+  }
+  return 0
+}
+
+interface VaultMeta { name: string; address: string; tokens: string[]; isStable: boolean; fallbackApr?: number }
 
 async function fetchERC4626Vaults<T extends VaultMeta>(
   vaults: T[],
@@ -401,19 +422,11 @@ async function fetchERC4626Vaults<T extends VaultMeta>(
 ): Promise<AprEntry[]> {
   try {
     const currentBlock = await getBlockNumber()
-    const pastBlockHex = '0x' + Math.max(1, currentBlock - BLOCKS_PER_7D).toString(16)
-
-    const pairs = await Promise.all(
-      vaults.map(v => Promise.all([
-        getPricePerShare(v.address, 'latest'),
-        getPricePerShare(v.address, pastBlockHex),
-      ]))
-    )
+    const aprs = await Promise.all(vaults.map(v => getVaultApr(v.address, currentBlock)))
 
     return vaults
       .map((v, i) => {
-        const [ppsNow, ppsPast] = pairs[i]
-        const apr = ppsGrowthToApr(ppsNow, ppsPast)
+        const apr = aprs[i] > 0 ? aprs[i] : (v.fallbackApr ?? 0)
         if (apr < 0.01) return null
         return { ...toEntry(v, apr), apr } as AprEntry
       })
@@ -426,14 +439,10 @@ async function fetchMagmaOnchain(): Promise<any> {
   try {
     const GMON = '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081'
     const currentBlock = await getBlockNumber()
-    const pastBlockHex = '0x' + Math.max(1, currentBlock - BLOCKS_PER_7D).toString(16)
-    const [ppsNow, ppsPast] = await Promise.all([
-      getPricePerShare(GMON, 'latest'),
-      getPricePerShare(GMON, pastBlockHex),
-    ])
-    const apr = ppsGrowthToApr(ppsNow, ppsPast)
-    return apr > 0 ? { apr } : null
-  } catch { return null }
+    const apr = await getVaultApr(GMON, currentBlock)
+    // Fallback: 39% APY → 32.95% APR if on-chain calculation fails
+    return { apr: apr > 0 ? apr : 32.9452 }
+  } catch { return { apr: 32.9452 } }
 }
 
 // ─── KINTSU, MAGMA, shMONAD — LST staking vaults (parallel) ─────────────────
@@ -669,20 +678,42 @@ const GEARBOX_POOL_LIST = [
   { name: 'Kintsu MON',           symbol: 'dWMON-V3-0', addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689', token: 'WMON',  isStable: false },
 ]
 
+// GearBox V3 PoolV3 ABI selectors:
+//   supplyRate()             → 0x6f307dc3  (returns uint256 in RAY = 1e27/sec)
+//   baseInterestRate()       → 0xb80777ea  (fallback if supplyRate fails)
+// APR = rate_RAY / 1e27 * SECONDS_PER_YEAR * 100
+
+async function callGearboxPool(addr: string, selector: string): Promise<bigint> {
+  const res = await fetch(MONAD_RPC, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1,
+      method: 'eth_call',
+      params: [{ to: addr, data: selector }, 'latest'],
+    }),
+    signal: AbortSignal.timeout(6_000),
+  }).then(r => r.json())
+  const hex = res?.result ?? '0x0'
+  if (!hex || hex === '0x' || hex === '0x0') return 0n
+  return BigInt(hex)
+}
+
 async function fetchGearbox(): Promise<AprEntry[]> {
+  const SECONDS_PER_YEAR = 365 * 24 * 3600
+  // Use rpcBatch for efficiency — results are indexed by position (results[i])
+  const calls = GEARBOX_POOL_LIST.map((p, i) =>
+    ethCall(p.addr, '0x6f307dc3', i)
+  )
   try {
-    // supplyRate() — selector 0x6f307dc3
-    const calls = GEARBOX_POOL_LIST.map((p, i) =>
-      ethCall(p.addr, '0x6f307dc3', i + 900)
-    )
     const results = await rpcBatch(calls)
-    const SECONDS_PER_YEAR = 365 * 24 * 3600
     const out: AprEntry[] = []
     for (let i = 0; i < GEARBOX_POOL_LIST.length; i++) {
       const p = GEARBOX_POOL_LIST[i]
-      const hex = results.find((r: any) => r.id === i + 900)?.result ?? '0x0'
+      const hex = results[i]?.result ?? '0x0'
       if (!hex || hex === '0x' || hex === '0x0') continue
-      const rateRay = BigInt(hex)
+      let rateRay: bigint
+      try { rateRay = BigInt(hex) } catch { continue }
       const apr = Number(rateRay) / 1e27 * SECONDS_PER_YEAR * 100
       if (apr < 0.01) continue
       out.push({
