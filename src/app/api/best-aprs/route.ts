@@ -662,7 +662,8 @@ function buildKintsuEntry(apr: number): AprEntry {
 // Source: static JSON updated by GearBox with each deployment.
 // supplyRate is already annualised in RAY (1e27). APR = supplyRate / 1e27 * 100.
 
-const GEARBOX_STATIC_URL = 'https://static.gearbox.finance/client-v3/configs/pools/pools.json'
+const GEARBOX_STATIC_URL   = 'https://static.gearbox.finance/client-v3/configs/pools/pools.json'
+const GEARBOX_APY_URL      = 'https://state-cache.gearbox.foundation/apy-server/latest.json'
 
 const GEARBOX_POOL_LIST = [
   { addr: '0x09cA6b76276eC0682adb896418b99CB7E44a58A0', token: 'WMON', isStable: false },
@@ -672,14 +673,40 @@ const GEARBOX_POOL_LIST = [
   { addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689', token: 'WMON', isStable: false },
 ]
 
-async function fetchGearbox(): Promise<AprEntry[]> {
+// Returns a map of pool address (lowercase) → total extraAPY from incentive programs
+async function fetchGearboxExtraApy(): Promise<Map<string, number>> {
+  const map = new Map<string, number>()
   try {
-    const res = await fetch(GEARBOX_STATIC_URL, {
+    const res = await fetch(GEARBOX_APY_URL, {
       signal: AbortSignal.timeout(8_000),
       cache: 'no-store',
     })
-    if (!res.ok) return []
+    if (!res.ok) return map
     const data = await res.json()
+    const pools: any[] = data?.chains?.['143']?.pools?.data ?? []
+    const now = Math.floor(Date.now() / 1000)
+
+    for (const entry of pools) {
+      const addr = (entry?.pool ?? '').toLowerCase()
+      const extraAPY: any[] = entry?.rewards?.extraAPY ?? []
+      // Sum all active incentive programs (filter expired by endTimestamp)
+      const total = extraAPY
+        .filter((e: any) => !e.endTimestamp || e.endTimestamp > now)
+        .reduce((sum: number, e: any) => sum + (Number(e.apy) || 0), 0)
+      if (total > 0) map.set(addr, total)
+    }
+  } catch { /* ignore, just no extra APY */ }
+  return map
+}
+
+async function fetchGearbox(): Promise<AprEntry[]> {
+  try {
+    const [poolsRes, extraApyMap] = await Promise.all([
+      fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
+      fetchGearboxExtraApy(),
+    ])
+    if (!poolsRes.ok) return []
+    const data = await poolsRes.json()
     const markets: any[] = data?.markets ?? []
 
     const out: AprEntry[] = []
@@ -696,8 +723,11 @@ async function fetchGearbox(): Promise<AprEntry[]> {
       if (supplyRay === 0n) continue
 
       // supplyRate is annualised in RAY (1e27)
-      const apr = Number(supplyRay) / 1e27 * 100
-      if (apr < 0.01 || apr > 500) continue
+      const baseApr = Number(supplyRay) / 1e27 * 100
+      if (baseApr < 0.01 || baseApr > 500) continue
+
+      const extraApr = extraApyMap.get(addr.toLowerCase()) ?? 0
+      const apr = baseApr + extraApr
 
       out.push({
         protocol: 'GearBox V3',
