@@ -432,12 +432,61 @@ async function fetchERC4626Vaults<T extends VaultMeta>(
   } catch { return [] }
 }
 
-// ─── MAGMA — gMON vault APR (on-chain) ───────────────────────────────────────
+// ─── MAGMA — gMON APY via GraphQL backend ────────────────────────────────────
+// Source: magma-http-app.fly.dev (reverse-engineered from magmastaking.xyz bundle)
+// APY model (from their UI source):
+//   base APY = 13% (hardcoded in UI)
+//   points APY = 19_200_000 / tvlInMON * 100
+//   total APY = base + points
+// We fetch TVL from their GraphQL, then apply the same formula.
+// gMON contract: 0x8498312A6B3CbD158bf0c93AbdCF29E6e4F55081
+// convertToAssets(1e18) gives MON per 1 gMON (exchange rate).
+
+const MAGMA_GQL = 'https://magma-http-app.fly.dev/graphql'
+const MAGMA_BASE_APY = 13 // % — hardcoded in their UI
+
 async function fetchMagmaOnchain(): Promise<any> {
   try {
-    const GMON = '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081'
-    const currentBlock = await getBlockNumber()
-    const apr = await getVaultApr(GMON, currentBlock)
+    // 1. Fetch TVL (in raw gMON units, 1e18 denominated) from GraphQL
+    const gqlRes = await fetch(MAGMA_GQL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: `{ tvlMats { sum } }`,
+      }),
+      signal: AbortSignal.timeout(8_000),
+      cache: 'no-store',
+    })
+    if (!gqlRes.ok) return null
+    const gqlData = await gqlRes.json()
+    const tvlRaw = Number(gqlData?.data?.tvlMats?.[0]?.sum ?? 0)
+    if (tvlRaw <= 0) return null
+
+    // 2. Fetch gMON → MON exchange rate on-chain (convertToAssets(1e18))
+    const rpcRes = await fetch(MONAD_RPC, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'eth_call',
+        params: [{ to: '0x8498312A6B3CbD158bf0c93AbdCF29E6e4F55081', data: CONVERT_TO_ASSETS }, 'latest'],
+      }),
+      signal: AbortSignal.timeout(6_000),
+      cache: 'no-store',
+    }).then(r => r.json())
+    const hex = rpcRes?.result ?? '0x0'
+    const pps = hex && hex !== '0x' && hex !== '0x0' ? Number(BigInt(hex)) / 1e18 : 1
+
+    // 3. tvlInMON = (tvlRaw / 1e18) * pps
+    const tvlInMON = (tvlRaw / 1e18) * pps
+    if (tvlInMON <= 0) return null
+
+    // 4. APY = base + points (same formula as their UI)
+    const pointsApy = (19_200_000 / tvlInMON) * 100
+    const totalApy  = MAGMA_BASE_APY + pointsApy
+
+    // 5. Convert APY → APR (daily compounding), cap at 500% to avoid absurd values on low TVL
+    const rawApr = apyToApr(totalApy / 100) * 100
+    const apr = Math.min(rawApr, 500)
     return apr > 0 ? { apr } : null
   } catch { return null }
 }
