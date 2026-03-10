@@ -662,7 +662,7 @@ function buildKintsuEntry(apr: number): AprEntry {
 // Source: static JSON updated by GearBox with each deployment.
 // supplyRate is already annualised in RAY (1e27). APR = supplyRate / 1e27 * 100.
 
-const GEARBOX_STATIC_URL   = 'https://static.gearbox.finance/client-v3/configs/pools/pools.json'
+const GEARBOX_STATIC_URL   = 'https://state-cache.gearbox.foundation/Monad.json'
 const GEARBOX_APY_URL      = 'https://state-cache.gearbox.foundation/apy-server/latest.json'
 
 const GEARBOX_POOL_LIST = [
