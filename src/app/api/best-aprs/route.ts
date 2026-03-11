@@ -259,29 +259,52 @@ async function fetchCurve(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── UPSHIFT — AUSD vault ─────────────────────────────────────────────────────
-// ─── UPSHIFT — vaults (Monad only) ───────────────────────────────────────────
-// ─── UPSHIFT — vaults (Monad, chainId 143) ──────────────────────────────────
-// /api/proxy/vaults is inaccessible server-side (Next.js internal proxy).
-// APR derived on-chain: ERC4626 convertToAssets 7-day delta, annualised.
-// convertToAssets(1e18) selector: 0x07a2d13a
-
-const UPSHIFT_VAULTS_ONCHAIN = [
-  {
-    name: 'earnAUSD',
-    address: '0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA',
-    tokens: ['AUSD', 'USDC'],
-    isStable: true,
-  },
-  {
-    name: 'earnMON Vault',
-    address: '0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C',
-    tokens: ['WMON', 'MVT'],
-    isStable: false,
-  },
-]
+// ─── UPSHIFT — vaults via REST API (fallback: ERC4626 on-chain) ──────────────
+const UPSHIFT_KNOWN_STABLECOINS = new Set(['AUSD', 'USDC', 'USDT', 'USDT0', 'DAI', 'FRAX'])
 
 async function fetchUpshift(): Promise<AprEntry[]> {
+  try {
+    const res = await fetch('https://app.upshift.finance/api/vaults?chainId=143', {
+      signal: AbortSignal.timeout(10_000),
+      cache: 'no-store',
+    })
+    if (!res.ok) return fetchUpshiftOnchain()
+    const data = await res.json()
+    const vaults: any[] = data?.vaults ?? data ?? []
+    if (!Array.isArray(vaults) || vaults.length === 0) return fetchUpshiftOnchain()
+
+    const out: AprEntry[] = []
+    for (const v of vaults) {
+      const rawApr = Number(v.apr ?? v.apy ?? v.netApy ?? 0)
+      const apr = rawApr > 0 && rawApr < 2 ? rawApr * 100 : rawApr
+      if (apr < 0.01) continue
+      const sym = v.asset?.symbol ?? v.underlyingSymbol ?? v.symbol ?? ''
+      const tokenList: string[] = v.tokens ?? v.assets ?? (sym ? [sym] : ['?'])
+      const stable = tokenList.every((t: string) => UPSHIFT_KNOWN_STABLECOINS.has(t))
+      out.push({
+        protocol: 'Upshift',
+        logo: '🔺',
+        url: v.url ?? `https://app.upshift.finance/vaults/${v.address ?? ''}`,
+        tokens: tokenList,
+        label: v.name ?? v.vaultName ?? tokenList.join(' / '),
+        apr,
+        type: 'vault',
+        isStable: stable,
+      })
+    }
+    return out.length > 0 ? out : fetchUpshiftOnchain()
+  } catch {
+    return fetchUpshiftOnchain()
+  }
+}
+
+// Fallback: ERC4626 pricePerShare delta for known vault addresses
+const UPSHIFT_VAULTS_ONCHAIN = [
+  { name: 'earnAUSD',      address: '0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA', tokens: ['AUSD', 'USDC'], isStable: true  },
+  { name: 'earnMON Vault', address: '0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C', tokens: ['WMON'],         isStable: false },
+]
+
+async function fetchUpshiftOnchain(): Promise<AprEntry[]> {
   return fetchERC4626Vaults(
     UPSHIFT_VAULTS_ONCHAIN,
     v => ({
