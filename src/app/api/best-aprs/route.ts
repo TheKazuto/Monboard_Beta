@@ -492,15 +492,30 @@ async function fetchKintsusMON(): Promise<AprEntry | null> {
   } catch { return null }
 }
 
+// ─── shMONAD — on-chain ERC4626 pricePerShare delta ─────────────────────────
+// Confirmed working: convertToAssets(1e18) responds, 7d APR ~11.3%
+// asset() = 0xeeee...ee (native MON). api.shmonad.xyz is offline (530).
+const SHMON_ADDRESS = '0x1B68626dCa36c7fE922fD2d55E4f631d962dE19c'
+
+async function fetchShMonad(): Promise<AprEntry | null> {
+  try {
+    const currentBlock = await getBlockNumber()
+    const apr = await getVaultApr(SHMON_ADDRESS, currentBlock)
+    if (apr <= 0) return null
+    return {
+      protocol: 'shMonad', logo: '⚡', url: 'https://shmonad.xyz',
+      tokens: ['shMON'], label: 'Holistic Staked MON',
+      apr, type: 'vault', isStable: false,
+    }
+  } catch { return null }
+}
+
 // ─── KINTSU, MAGMA, shMONAD — LST staking vaults (parallel) ─────────────────
 async function fetchLSTVaults(): Promise<AprEntry[]> {
   const [kintsuR, magmaR, shmonadR] = await Promise.allSettled([
     fetchKintsusMON(),
-    // Magma: derive APY on-chain from gMON vault pricePerShare 7-day delta
     fetchMagmaOnchain(),
-    fetch('https://api.shmonad.xyz/v1/apr', {
-      signal: AbortSignal.timeout(6_000), cache: 'no-store',
-    }).then(r => r.ok ? r.json() : null),
+    fetchShMonad(),
   ])
 
   const entries: AprEntry[] = []
@@ -518,15 +533,8 @@ async function fetchLSTVaults(): Promise<AprEntry[]> {
     })
   }
 
-  const sData = shmonadR.status === 'fulfilled' ? shmonadR.value : null
-  if (sData) {
-    const apr = Number(sData?.apr ?? sData?.stakingApr ?? 0) * (sData?.apr < 2 ? 100 : 1)
-    if (apr > 0) entries.push({
-      protocol: 'shMonad', logo: '⚡', url: 'https://shmonad.xyz',
-      tokens: ['shMON'], label: 'Holistic Staked MON',
-      apr, type: 'vault', isStable: false,
-    })
-  }
+  const sEntry = shmonadR.status === 'fulfilled' ? shmonadR.value : null
+  if (sEntry) entries.push(sEntry)
 
   return entries
 }
