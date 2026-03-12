@@ -262,106 +262,80 @@ async function fetchCurve(): Promise<AprEntry[]> {
 // ─── UPSHIFT — vaults via REST API (fallback: ERC4626 on-chain) ──────────────
 const UPSHIFT_KNOWN_STABLECOINS = new Set(['AUSD', 'USDC', 'USDT', 'USDT0', 'DAI', 'FRAX'])
 
+// ─── UPSHIFT — vaults via /api/proxy/vaults ──────────────────────────────────
+// Source: https://app.upshift.finance/api/proxy/vaults
+// Filtros: chainId=143, status=active, isVisible=true, tvl>1000, apy.apy>0
+// APY field: apy.apy (já em %, ex: 14.0 = 14%) — target APY definido pela equipe
+// campaignApy: incentivos extras em %, somamos ao base para APR total
+// superMON (0x792C) ignorado — mesmo vault coberto pelo Kintsu
+// Sem fallback on-chain: vaults usam ABI customizada (August protocol), não ERC4626
+
+const UPSHIFT_PROXY_URL = 'https://app.upshift.finance/api/proxy/vaults'
+const UPSHIFT_IGNORE    = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c']) // superMON = Kintsu
+
 async function fetchUpshift(): Promise<AprEntry[]> {
   try {
-    const res = await fetch('https://app.upshift.finance/api/vaults?chainId=143', {
+    const res = await fetch(UPSHIFT_PROXY_URL, {
       signal: AbortSignal.timeout(10_000),
       cache: 'no-store',
     })
-    if (!res.ok) return fetchUpshiftOnchain()
+    if (!res.ok) return []
     const data = await res.json()
-    const vaults: any[] = data?.vaults ?? data ?? []
-    if (!Array.isArray(vaults) || vaults.length === 0) return fetchUpshiftOnchain()
+    const vaults: any[] = data?.data ?? []
+    if (!Array.isArray(vaults) || vaults.length === 0) return []
 
     const out: AprEntry[] = []
     for (const v of vaults) {
-      const rawApr = Number(v.apr ?? v.apy ?? v.netApy ?? 0)
-      const apr = rawApr > 0 && rawApr < 2 ? rawApr * 100 : rawApr
+      // Filtros básicos
+      if (v.chainId !== 143) continue
+      if (v.status !== 'active') continue
+      if (!v.isVisible) continue
+      if ((v.latest_reported_tvl ?? 0) < 1_000) continue
+      if (UPSHIFT_IGNORE.has((v.address ?? '').toLowerCase())) continue
+
+      // APY em % (ex: 14.0 = 14%). null = sem dados → skip
+      const baseApy = Number(v.apy?.apy ?? 0)
+      if (baseApy <= 0) continue
+
+      // campaignApy são incentivos extras (também em %)
+      const campaignApy = Number(v.apy?.campaignApy ?? 0)
+      const totalApy    = baseApy + (campaignApy > 0 ? campaignApy : 0)
+
+      // APY % → APR % com daily compounding
+      const apr = Math.min(apyToApr(totalApy / 100) * 100, 500)
       if (apr < 0.01) continue
-      const sym = v.asset?.symbol ?? v.underlyingSymbol ?? v.symbol ?? ''
-      const tokenList: string[] = v.tokens ?? v.assets ?? (sym ? [sym] : ['?'])
-      const stable = tokenList.every((t: string) => UPSHIFT_KNOWN_STABLECOINS.has(t))
+
+      // Tokens de depósito
+      const depositSymbols: string[] = (v.depositAssets ?? []).map((a: any) => a.symbol).filter(Boolean)
+      const tokens = depositSymbols.length > 0 ? depositSymbols : ['?']
+      const stable = tokens.every((t: string) => UPSHIFT_KNOWN_STABLECOINS.has(t))
+
       out.push({
         protocol: 'Upshift',
-        logo: '🔺',
-        url: v.url ?? `https://app.upshift.finance/vaults/${v.address ?? ''}`,
-        tokens: tokenList,
-        label: v.name ?? v.vaultName ?? tokenList.join(' / '),
+        logo:     '🔺',
+        url:      `https://app.upshift.finance/vaults/${v.address ?? ''}`,
+        tokens,
+        label:    v.name ?? tokens.join(' / '),
         apr,
-        type: 'vault',
+        type:     'vault',
         isStable: stable,
       })
     }
-    return out.length > 0 ? out : fetchUpshiftOnchain()
-  } catch {
-    return fetchUpshiftOnchain()
-  }
-}
-
-// Fallback: ERC4626 pricePerShare delta for known vault addresses
-const UPSHIFT_VAULTS_ONCHAIN = [
-  { name: 'earnAUSD',      address: '0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA', tokens: ['AUSD', 'USDC'], isStable: true  },
-  { name: 'earnMON Vault', address: '0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C', tokens: ['WMON'],         isStable: false },
-]
-
-async function fetchUpshiftOnchain(): Promise<AprEntry[]> {
-  return fetchERC4626Vaults(
-    UPSHIFT_VAULTS_ONCHAIN,
-    v => ({
-      protocol: 'Upshift',
-      logo:     '🔺',
-      url:      `https://app.upshift.finance/vaults/${v.address}`,
-      tokens:   v.tokens,
-      label:    v.name,
-      type:     'vault' as const,
-      isStable: v.isStable,
-    })
-  )
+    return out
+  } catch { return [] }
 }
 // ─── LAGOON — vaults ──────────────────────────────────────────────────────────
 async function fetchLagoon(): Promise<AprEntry[]> {
-  try {
-    const res = await fetch('https://api.lagoon.finance/v1/vaults?chainId=143', {
-      signal: AbortSignal.timeout(8_000), cache: 'no-store',
-    })
-    if (!res.ok) return []
-    const data = await res.json()
-    const vaults: any[] = data?.vaults ?? data ?? []
-    return vaults
-      .filter((v: any) => Number(v.apy ?? v.apr ?? 0) > 0)
-      .map((v: any) => {
-        const sym = v.asset ?? v.underlyingSymbol ?? '?'
-        const apr = Number(v.apy ?? v.apr ?? 0) * (v.apy < 2 ? 100 : 1)
-        return {
-          protocol: 'Lagoon', logo: '🏝️', url: 'https://app.lagoon.finance',
-          tokens: [sym], label: v.name ?? v.vaultName ?? `${sym} Vault`,
-          apr, type: 'vault' as const, isStable: isStable(sym),
-        }
-      })
-  } catch { return [] }
+  // Endpoint /v1/vaults returns 404 — disabled until correct endpoint is found
+  // TODO: re-enable when Lagoon publishes correct API docs for Monad
+  return []
 }
 
 // ─── KURU — pool APRs ─────────────────────────────────────────────────────────
 async function fetchKuru(): Promise<AprEntry[]> {
-  try {
-    const res = await fetch('https://api.kuru.io/v1/pools?chain=monad', {
-      signal: AbortSignal.timeout(8_000), cache: 'no-store',
-    })
-    if (!res.ok) return []
-    const data = await res.json()
-    const pools: any[] = data?.pools ?? data ?? []
-    return pools
-      .filter((p: any) => Number(p.apy ?? p.apr ?? 0) > 0)
-      .map((p: any) => {
-        const tokens = [p.base, p.quote].filter(Boolean)
-        const apr    = Number(p.apy ?? p.apr ?? 0) * (p.apy < 2 ? 100 : 1)
-        return {
-          protocol: 'Kuru', logo: '🌀', url: 'https://app.kuru.io',
-          tokens, label: tokens.join(' / ') || p.market,
-          apr, type: 'pool' as const, isStable: allStable(tokens),
-        }
-      })
-  } catch { return [] }
+  // Endpoint /v1/pools?chain=monad returns 404 — disabled until correct endpoint is found
+  // TODO: re-enable when Kuru publishes correct API docs for Monad
+  return []
 }
 
 // ─── MIDAS — tokenized RWAs (known fixed APRs) ────────────────────────────────
@@ -455,68 +429,16 @@ async function fetchERC4626Vaults<T extends VaultMeta>(
   } catch { return [] }
 }
 
-// ─── MAGMA — gMON APY via GraphQL backend ────────────────────────────────────
-// Source: magma-http-app.fly.dev (reverse-engineered from magmastaking.xyz bundle)
-// APY model (from their UI source):
-//   base APY = 13% (hardcoded in UI)
-//   points APY = 19_200_000 / tvlInMON * 100
-//   total APY = base + points
-// We fetch TVL from their GraphQL, then apply the same formula.
-// gMON contract: 0x8498312A6B3CbD158bf0c93AbdCF29E6e4F55081
-// convertToAssets(1e18) gives MON per 1 gMON (exchange rate).
-
-const MAGMA_GQL = 'https://magma-http-app.fly.dev/graphql'
-const MAGMA_BASE_APY = 13 // % — hardcoded in their UI
+// ─── MAGMA — gMON APR via on-chain ERC4626 pricePerShare delta ───────────────
+// gMON (0x8498312A6B3CbD158bf0c93AbdCF29E6e4F55081) implements convertToAssets
+// and has enough block history for 7d delta. Confirmed working via debug route.
+// GraphQL at magma-http-app.fly.dev/graphql returns 500 — not used.
 
 async function fetchMagmaOnchain(): Promise<any> {
   try {
-    // 1. Fetch TVL from Magma GraphQL backend
-    // tvlMats[0].sum is raw gMON in wei (e.g. "50000000000000000000000000" = 50M gMON)
-    const gqlRes = await fetch(MAGMA_GQL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: `{ tvlMats { sum } }` }),
-      signal: AbortSignal.timeout(8_000),
-      cache: 'no-store',
-    })
-    if (!gqlRes.ok) return null
-    const gqlData = await gqlRes.json()
-    const sumStr: string = String(gqlData?.data?.tvlMats?.[0]?.sum ?? '0')
-    if (!sumStr || sumStr === '0') return null
-
-    // Use BigInt to avoid float precision loss on large wei values
-    const tvlWei = BigInt(sumStr)
-    const tvlGmon = Number(tvlWei) / 1e18   // gMON count (fractional OK here)
-
-    // 2. gMON → MON exchange rate via previewMint(1e18) on-chain
-    // previewMint tells how many MON needed to mint 1 gMON
-    const rpcRes = await fetch(MONAD_RPC, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0', id: 1, method: 'eth_call',
-        params: [{ to: '0x8498312A6B3CbD158bf0c93AbdCF29E6e4F55081', data: CONVERT_TO_ASSETS }, 'latest'],
-      }),
-      signal: AbortSignal.timeout(6_000),
-      cache: 'no-store',
-    }).then(r => r.json())
-    const hex = rpcRes?.result ?? ''
-    const pps = (hex && hex !== '0x' && hex !== '0x0')
-      ? Number(BigInt(hex)) / 1e18
-      : 1.0   // fallback: 1:1 if RPC fails
-
-    // 3. TVL in MON terms (same as their UI: sum/1e18 * exchangeRate)
-    const tvlInMon = tvlGmon * pps
-    if (tvlInMon <= 0) return null
-
-    // 4. Same APY formula used in magmastaking.xyz source:
-    //    pointsApy = 19_200_000 / tvlInMon * 100   (as a percentage)
-    //    totalApy  = 13% base + pointsApy
-    const pointsApy = (19_200_000 / tvlInMon) * 100
-    const totalApy  = MAGMA_BASE_APY + pointsApy   // already in %
-
-    // 5. APY% → APR% (daily compounding). Cap at 500% for sanity.
-    const apr = Math.min(apyToApr(totalApy / 100) * 100, 500)
+    const GMON = '0x8498312A6B3CbD158bf0c93AbdCF29E6e4F55081'
+    const currentBlock = await getBlockNumber()
+    const apr = await getVaultApr(GMON, currentBlock)
     return apr > 0 ? { apr } : null
   } catch { return null }
 }
