@@ -443,12 +443,59 @@ async function fetchMagmaOnchain(): Promise<any> {
   } catch { return null }
 }
 
+// ─── KINTSU sMON — APR via Protocol_LST_Analytics_Day GraphQL ────────────────
+// Source: https://kintsu.xyz/api/graphql (no auth required)
+// APR = (totalRewards delta 7d / avg TVL 7d) / 7 * 365
+// totalRewards is cumulative MON, totalPooledStaked is current TVL in MON.
+// 7d window is more stable than 1d due to validator reward variance.
+
+const KINTSU_LST_GQL = 'https://kintsu.xyz/api/graphql'
+const KINTSU_LST_QUERY = `{
+  Protocol_LST_Analytics_Day(
+    where: { chainId: { _eq: 143 } }
+    order_by: { date: desc }
+    limit: 8
+  ) {
+    date
+    totalRewards
+    totalPooledStaked
+  }
+}`
+
+async function fetchKintsusMON(): Promise<AprEntry | null> {
+  try {
+    const res = await fetch(KINTSU_LST_GQL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: KINTSU_LST_QUERY }),
+      signal: AbortSignal.timeout(8_000),
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    const json = await res.json()
+    const rows: any[] = json?.data?.Protocol_LST_Analytics_Day ?? []
+    if (rows.length < 8) return null
+
+    // rows[0] = today, rows[7] = 7 days ago
+    const rewardsDelta = Number(rows[0].totalRewards) - Number(rows[7].totalRewards)
+    const tvlAvg = rows.slice(0, 7).reduce((s: number, r: any) => s + Number(r.totalPooledStaked), 0) / 7
+
+    if (rewardsDelta <= 0 || tvlAvg <= 0) return null
+    const apr = Math.min((rewardsDelta / tvlAvg) / 7 * 365 * 100, 100)
+    if (apr < 0.01) return null
+
+    return {
+      protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
+      tokens: ['sMON'], label: 'Staked MON',
+      apr, type: 'vault', isStable: false,
+    }
+  } catch { return null }
+}
+
 // ─── KINTSU, MAGMA, shMONAD — LST staking vaults (parallel) ─────────────────
 async function fetchLSTVaults(): Promise<AprEntry[]> {
   const [kintsuR, magmaR, shmonadR] = await Promise.allSettled([
-    fetch('https://api.kintsu.xyz/v1/apr?chainId=143', {
-      signal: AbortSignal.timeout(6_000), cache: 'no-store',
-    }).then(r => r.ok ? r.json() : null),
+    fetchKintsusMON(),
     // Magma: derive APY on-chain from gMON vault pricePerShare 7-day delta
     fetchMagmaOnchain(),
     fetch('https://api.shmonad.xyz/v1/apr', {
@@ -458,19 +505,12 @@ async function fetchLSTVaults(): Promise<AprEntry[]> {
 
   const entries: AprEntry[] = []
 
-  const kData = kintsuR.status === 'fulfilled' ? kintsuR.value : null
-  if (kData) {
-    const apr = Number(kData?.apr ?? kData?.stakingApr ?? 0) * (kData?.apr < 2 ? 100 : 1)
-    if (apr > 0) entries.push({
-      protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
-      tokens: ['sMON'], label: 'Staked MON',
-      apr, type: 'vault', isStable: false,
-    })
-  }
+  const kEntry = kintsuR.status === 'fulfilled' ? kintsuR.value : null
+  if (kEntry) entries.push(kEntry)
 
   const mData = magmaR.status === 'fulfilled' ? magmaR.value : null
   if (mData) {
-    const apr = Number(mData?.apr ?? mData?.stakingApr ?? 0) * (mData?.apr < 2 ? 100 : 1)
+    const apr = Number(mData?.apr ?? 0)
     if (apr > 0) entries.push({
       protocol: 'Magma', logo: '🐲', url: 'https://magmastaking.xyz',
       tokens: ['gMON'], label: 'MEV-Optimized Staked MON',
@@ -619,31 +659,31 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
 }
 
 // ─── KINTSU — superMON vault ─────────────────────────────────────────────────
-// API: https://kintsu.xyz/api/vaults/get-vault?address=<vault>
-// historical_apy values are decimals (0.088 = 8.8% APY). Use 30d if available,
-// else 7d. Convert APY → APR with daily compounding.
+// superMON (0x792C) é gerido pela Kintsu mas listado na Upshift proxy API.
+// historical_apy.7 = APY decimal (ex: 0.1077 = 10.77%). Usar 7d.
+// Nota: Upshift pode retornar 429 — nesse caso retorna [].
 
 const KINTSU_VAULT_ADDRESS = '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'
 async function fetchKintsuVault(): Promise<AprEntry[]> {
   try {
-    const res = await fetch(
-      `https://kintsu.xyz/api/vaults/get-vault?address=${KINTSU_VAULT_ADDRESS}`,
-      { signal: AbortSignal.timeout(10_000), cache: 'no-store' },
+    const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
+      signal: AbortSignal.timeout(10_000), cache: 'no-store',
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    const vaults: any[] = data?.data ?? []
+    const vault = vaults.find(
+      (v: any) => (v.address ?? '').toLowerCase() === KINTSU_VAULT_ADDRESS.toLowerCase()
     )
-    const json = res.ok ? await res.json() : null
-    const vault = json?.data ?? null
+    if (!vault) return []
 
-    if (vault && vault.status === 'active') {
-      const hist = vault.historical_apy ?? {}
-      // Prefer 30d APY; fall back to 7d; values are decimals (e.g. 0.088)
-      const apyDecimal = hist['30'] ?? hist['7'] ?? null
-      if (typeof apyDecimal === 'number' && apyDecimal > 0) {
-        const apr = 365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100
-        return [buildKintsuEntry(apr)]
-      }
-    }
-  } catch { /* ignore */ }
-  return []
+    const hist = vault.historical_apy ?? {}
+    const apyDecimal = hist['7'] ?? hist['30'] ?? null
+    if (typeof apyDecimal !== 'number' || apyDecimal <= 0) return []
+
+    const apr = Math.min(365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100, 200)
+    return [buildKintsuEntry(apr)]
+  } catch { return [] }
 }
 
 function buildKintsuEntry(apr: number): AprEntry {
