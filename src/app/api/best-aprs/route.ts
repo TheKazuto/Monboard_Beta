@@ -409,12 +409,13 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
       const apr = Number(opp.apr ?? 0)
       if (apr <= 0) continue
 
-      // Underlying = verified token OR token whose symbol doesn't start with lowercase 'c'
-      // Curvance wrappers always have symbol starting with 'c': cAUSD, cWMON, cWETH, cearnAUSD, cYZM, etc.
+      // Curvance wrappers always start with lowercase 'c' + letter: cAUSD, cWMON, cearnAUSD, cYZM, cUSDC
+      // Underlying tokens never start with 'c': AUSD, WMON, earnAUSD, YZM, USDC, WETH, syzUSD, etc.
+      // Priority: (1) non-wrapper by symbol pattern, (2) verified=true among remaining, (3) first token
       const tokens: any[] = opp.tokens ?? []
       const underlying =
+        tokens.find((t: any) => !/^c[A-Za-z]/.test(t.symbol ?? '')) ??
         tokens.find((t: any) => t.verified === true) ??
-        tokens.find((t: any) => !/^c[A-Z]/.test(t.symbol ?? '')) ??
         tokens[0]
       const tokenSymbol = underlying?.symbol ?? 'TOKEN'
       const isStable = ['USDC','AUSD','USDT','USDT0','DAI','earnAUSD','sAUSD'].includes(tokenSymbol)
@@ -423,10 +424,10 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
       const marketMatch = (opp.name as string)?.match(/Curvance (.+?) market/)
       const label = marketMatch ? `Curvance ${marketMatch[1]}` : (opp.name ?? `Curvance ${tokenSymbol}`)
 
-      // Sum Merkl incentive APR + native APY (converted to APR) for the deposited token
+      // nativeApyMap from floppy-backup is empty (API returns 403 server-side)
+      // keeping the param for future use when a working source is found
       const nativeApy = nativeApyMap.get(tokenSymbol.toUpperCase()) ?? 0
-      const nativeApr = apyToApr(nativeApy / 100) * 100
-      const totalApr = apr + nativeApr
+      const nativeApr = nativeApy > 0 ? apyToApr(nativeApy / 100) * 100 : 0
 
       entries.push({
         protocol: 'Curvance',
@@ -434,7 +435,7 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
         url: opp.depositUrl ?? 'https://app.curvance.com',
         tokens: [tokenSymbol],
         label,
-        apr: totalApr,
+        apr: apr + nativeApr,
         type: 'lend',
         isStable,
       })
@@ -589,17 +590,8 @@ const KINTSU_LST_QUERY = `{
   }
 }`
 
-async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
-  // Primary: floppy-backup API (SMON APY)
-  const smonApy = nativeApyMap.get('SMON') ?? 0
-  if (smonApy > 0) {
-    return {
-      protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
-      tokens: ['sMON'], label: 'Staked MON',
-      apr: apyToApr(smonApy / 100) * 100, type: 'vault', isStable: false,
-    }
-  }
-  // Fallback: GraphQL (blocked server-side by Kintsu, but try anyway)
+async function fetchKintsusMON(_nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
+  // floppy-backup API is blocked server-side (403) — try GraphQL first, then hardcode
   try {
     const res = await fetch(KINTSU_LST_GQL, {
       method: 'POST',
@@ -622,7 +614,10 @@ async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEn
       tokens: ['sMON'], label: 'Staked MON',
       apr, type: 'vault', isStable: false,
     }
-  } catch { return null }
+  } catch { /* GraphQL blocked server-side */ }
+  // Both floppy-backup (403) and kintsu.xyz/api/graphql (500) blocked server-side.
+  // TODO: implement on-chain fallback once sMON contract ABI is confirmed via debug-smon
+  return null
 }
 
 // ─── shMONAD — on-chain ERC4626 pricePerShare delta ─────────────────────────
@@ -630,17 +625,9 @@ async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEn
 // asset() = 0xeeee...ee (native MON). api.shmonad.xyz is offline (530).
 const SHMON_ADDRESS = '0x1B68626dCa36c7fE922fD2d55E4f631d962dE19c'
 
-async function fetchShMonad(nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
-  // Primary: floppy-backup API (SHMON APY) — simpler and more up-to-date than on-chain delta
-  const shmonApy = nativeApyMap.get('SHMON') ?? 0
-  if (shmonApy > 0) {
-    return {
-      protocol: 'shMonad', logo: '⚡', url: 'https://shmonad.xyz',
-      tokens: ['shMON'], label: 'Holistic Staked MON',
-      apr: apyToApr(shmonApy / 100) * 100, type: 'vault', isStable: false,
-    }
-  }
-  // Fallback: on-chain ERC4626 pricePerShare 7d delta
+async function fetchShMonad(_nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
+  // floppy-backup API is blocked server-side (403) — use on-chain ERC4626 pricePerShare delta
+  // Confirmed working: convertToAssets(1e18) responds, 7d APR ~11-15%
   try {
     const currentBlock = await getBlockNumber()
     const apr = await getVaultApr(SHMON_ADDRESS, currentBlock)
