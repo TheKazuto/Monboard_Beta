@@ -325,10 +325,59 @@ async function fetchUpshift(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 // ─── LAGOON — vaults ──────────────────────────────────────────────────────────
+// API: GET /api/vaults?chainId=143&... → list vaults
+//      GET /api/vault-apr?chainId=143&address=X → APR per vault
+// APR preference: weeklyApr → monthlyApr → inceptionApr (linearNetApr)
 async function fetchLagoon(): Promise<AprEntry[]> {
-  // Endpoint /v1/vaults returns 404 — disabled until correct endpoint is found
-  // TODO: re-enable when Lagoon publishes correct API docs for Monad
-  return []
+  try {
+    const listRes = await fetch(
+      'https://app.lagoon.finance/api/vaults?chainId=143&underlyingassetSymbol=0&curatorId=0&pageIndex=0&pageSize=50&includeApr=false',
+      { signal: AbortSignal.timeout(8_000), cache: 'no-store' }
+    )
+    if (!listRes.ok) return []
+    const listData = await listRes.json()
+    const vaults: any[] = listData?.vaults ?? []
+    if (!vaults.length) return []
+
+    // Fetch APR for each vault in parallel
+    const aprResults = await Promise.allSettled(
+      vaults.map(v =>
+        fetch(`https://app.lagoon.finance/api/vault-apr?chainId=143&address=${v.address}`, {
+          signal: AbortSignal.timeout(8_000), cache: 'no-store',
+        }).then(r => r.ok ? r.json() : null)
+      )
+    )
+
+    const entries: AprEntry[] = []
+    for (let i = 0; i < vaults.length; i++) {
+      const vault = vaults[i]
+      const aprData = aprResults[i].status === 'fulfilled' ? aprResults[i].value : null
+      if (!aprData) continue
+
+      const s = aprData.state ?? {}
+      const apr =
+        s.weeklyApr?.linearNetApr ??
+        s.monthlyApr?.linearNetApr ??
+        s.inceptionApr?.linearNetApr ?? null
+
+      if (!apr || apr <= 0) continue
+
+      const token = vault.asset?.symbol ?? 'USDC'
+      const curator = vault.curators?.[0]?.name ?? 'Lagoon'
+
+      entries.push({
+        protocol: 'Lagoon',
+        logo: '🏝️',
+        url: `https://app.lagoon.finance/vault/${vault.address}`,
+        tokens: [token],
+        label: `${vault.name} (${curator})`,
+        apr,
+        type: 'vault',
+        isStable: ['USDC', 'USDT', 'AUSD', 'DAI', 'USDT0'].includes(token),
+      })
+    }
+    return entries
+  } catch { return [] }
 }
 
 // ─── KURU — pool APRs ─────────────────────────────────────────────────────────
