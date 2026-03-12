@@ -2,67 +2,77 @@ import { NextResponse } from 'next/server'
 
 export const revalidate = 0
 
-const BUNDLE_URL = 'https://shmonad.xyz/_next/static/chunks/9815-ef1543b76deda353.js'
+const MONAD_RPC = 'https://rpc.monad.xyz'
+const SHMON = '0x1B68626dCa36c7fE922fD2d55E4f631d962dE19c'
+const BLOCKS_PER_DAY = 172_800
 
-async function tryFetch(label: string, url: string) {
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
-    let body: any = null
-    try { body = await res.json() } catch { body = await res.text().catch(() => null) }
-    return { label, url, status: res.status, ok: res.ok, body: typeof body === 'string' ? body.slice(0, 300) : JSON.stringify(body)?.slice(0, 300) }
-  } catch (e: any) {
-    return { label, url, status: 0, ok: false, body: e.message }
-  }
+async function rpc(method: string, params: any[]) {
+  const res = await fetch(MONAD_RPC, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    signal: AbortSignal.timeout(6_000),
+    cache: 'no-store',
+  }).then(r => r.json())
+  return res?.result ?? null
+}
+
+const PAD18 = '0000000000000000000000000000000000000000000000000de0b6b3a7640000'
+
+async function call(data: string, block = 'latest') {
+  return rpc('eth_call', [{ to: SHMON, data }, block])
 }
 
 export async function GET() {
-  // 1. Fetch e analisa o bundle principal
-  let bundleAnalysis: any = {}
-  try {
-    const res = await fetch(BUNDLE_URL, { signal: AbortSignal.timeout(15_000), cache: 'no-store' })
-    const text = await res.text()
+  const blockHex = await rpc('eth_blockNumber', [])
+  const currentBlock = parseInt(blockHex, 16)
 
-    // Extrair URLs/endpoints
-    const urlMatches = [...text.matchAll(/["'`](https?:\/\/[^"'`\s]{10,})/g)].map(m => m[1])
-    const relativeApi = [...text.matchAll(/["'`](\/api\/[^"'`\s]{3,})/g)].map(m => m[1])
-    const contracts   = [...text.matchAll(/0x[0-9a-fA-F]{40}/g)].map(m => m[0])
+  const b1d = '0x' + Math.max(1, currentBlock - BLOCKS_PER_DAY).toString(16)
+  const b3d = '0x' + Math.max(1, currentBlock - BLOCKS_PER_DAY * 3).toString(16)
+  const b7d = '0x' + Math.max(1, currentBlock - BLOCKS_PER_DAY * 7).toString(16)
 
-    // Procurar por strings relevantes: apr, apy, staking, rate, reward
-    const aprMatches = [...text.matchAll(/.{0,60}(?:apr|apy|staking|stakingRate|reward|yield).{0,60}/gi)]
-      .map(m => m[0].trim())
-      .filter(s => s.length > 10)
-      .slice(0, 20)
+  const SEL = '0x07a2d13a' + PAD18 // convertToAssets(1e18)
 
-    // Procurar function selectors (4 bytes hex)
-    const selectors = [...new Set([...text.matchAll(/0x[0-9a-fA-F]{8}(?![0-9a-fA-F])/g)].map(m => m[0]))]
-
-    bundleAnalysis = {
-      size: text.length,
-      externalUrls: [...new Set(urlMatches)].slice(0, 30),
-      relativeApis: [...new Set(relativeApi)].slice(0, 30),
-      contracts: [...new Set(contracts)],
-      aprRelatedSnippets: aprMatches,
-      selectors: selectors.slice(0, 30),
-    }
-  } catch (e: any) {
-    bundleAnalysis = { error: e.message }
-  }
-
-  // 2. Testar endpoints REST prováveis do shMonad
-  const endpoints = await Promise.all([
-    tryFetch('shmonad /api/apr',           'https://shmonad.xyz/api/apr'),
-    tryFetch('shmonad /api/stats',         'https://shmonad.xyz/api/stats'),
-    tryFetch('shmonad /api/staking',       'https://shmonad.xyz/api/staking'),
-    tryFetch('shmonad /api/yield',         'https://shmonad.xyz/api/yield'),
-    tryFetch('shmonad /api/v1/apr',        'https://shmonad.xyz/api/v1/apr'),
-    tryFetch('api.shmonad.xyz /apr',       'https://api.shmonad.xyz/apr'),
-    tryFetch('api.shmonad.xyz /v1/stats',  'https://api.shmonad.xyz/v1/stats'),
-    tryFetch('api.shmonad.xyz /v2/apr',    'https://api.shmonad.xyz/v2/apr'),
+  const [
+    ppsNow, pps1d, pps3d, pps7d,
+    totalAssets, totalSupply, decimals, asset,
+  ] = await Promise.all([
+    call(SEL, 'latest'),
+    call(SEL, b1d),
+    call(SEL, b3d),
+    call(SEL, b7d),
+    call('0x01e1d114'), // totalAssets()
+    call('0x18160ddd'), // totalSupply()
+    call('0x313ce567'), // decimals()
+    call('0x38d52e0f'), // asset()
   ])
+
+  const toNum = (h: string | null) =>
+    h && h !== '0x' && h.length > 2 ? Number(BigInt(h)) / 1e18 : null
+
+  const now = toNum(ppsNow)
+  const d1  = toNum(pps1d)
+  const d3  = toNum(pps3d)
+  const d7  = toNum(pps7d)
+
+  const apr = (base: number | null, old: number | null, days: number) =>
+    base && old && base !== old ? ((base - old) / old) / days * 365 * 100 : null
 
   return NextResponse.json({
     timestamp: new Date().toISOString(),
-    bundle: bundleAnalysis,
-    endpoints,
+    contract: SHMON,
+    currentBlock,
+    pps: { now, d1, d3, d7 },
+    apr: {
+      '1d': apr(now, d1, 1),
+      '3d': apr(now, d3, 3),
+      '7d': apr(now, d7, 7),
+    },
+    raw: {
+      ppsNow, pps1d, pps3d, pps7d,
+      totalAssets, totalSupply,
+      decimals: decimals ? parseInt(decimals, 16) : null,
+      asset,
+    },
   })
 }
