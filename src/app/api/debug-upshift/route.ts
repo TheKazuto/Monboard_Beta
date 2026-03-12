@@ -2,85 +2,59 @@ import { NextResponse } from 'next/server'
 
 export const revalidate = 0
 
-function apyToApr(apy: number): number {
-  return 365 * (Math.pow(1 + apy, 1 / 365) - 1)
-}
-
-const UPSHIFT_IGNORE = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c'])
-
-export async function GET() {
-  // 1. Fetch raw
-  let raw: any = null
-  let fetchError: string | null = null
-  let fetchStatus = 0
-
+async function tryHeaders(label: string, headers: Record<string, string>) {
   try {
     const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
       signal: AbortSignal.timeout(10_000),
       cache: 'no-store',
+      headers,
     })
-    fetchStatus = res.status
-    try { raw = await res.json() } catch { raw = await res.text() }
+    let body: any = null
+    try { body = await res.json() } catch { body = await res.text().catch(() => null) }
+    return { label, status: res.status, ok: res.ok, bodyPreview: JSON.stringify(body)?.slice(0, 200) }
   } catch (e: any) {
-    fetchError = e.message
+    return { label, status: 0, ok: false, bodyPreview: e.message }
   }
+}
 
-  if (fetchError || !raw) {
-    return NextResponse.json({ fetchStatus, fetchError, raw })
-  }
+export async function GET() {
+  const results = await Promise.all([
+    tryHeaders('no headers', {}),
 
-  const vaults: any[] = raw?.data ?? []
+    tryHeaders('user-agent only', {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    }),
 
-  // 2. Todos os vaults brutos
-  const allVaults = vaults.map(v => ({
-    name:        v.name,
-    address:     v.address,
-    chainId:     v.chainId,
-    status:      v.status,
-    isVisible:   v.isVisible,
-    tvl:         v.latest_reported_tvl,
-    apy:         v.apy,
-    historical:  v.historical_apy,
-    decimals:    v.decimals,
-    depositAssets: (v.depositAssets ?? []).map((a: any) => a.symbol),
-  }))
+    tryHeaders('referer + origin', {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Referer':    'https://app.upshift.finance/',
+      'Origin':     'https://app.upshift.finance',
+    }),
 
-  // 3. Filtro passo a passo para Monad
-  const step1_monad    = vaults.filter(v => v.chainId === 143)
-  const step2_active   = step1_monad.filter(v => v.status === 'active')
-  const step3_visible  = step2_active.filter(v => v.isVisible === true)
-  const step4_tvl      = step3_visible.filter(v => (v.latest_reported_tvl ?? 0) >= 1_000)
-  const step5_noIgnore = step4_tvl.filter(v => !UPSHIFT_IGNORE.has((v.address ?? '').toLowerCase()))
-  const step6_hasApy   = step5_noIgnore.filter(v => Number(v.apy?.apy ?? 0) > 0)
+    tryHeaders('full browser headers', {
+      'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Accept':          'application/json, */*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Referer':         'https://app.upshift.finance/',
+      'Origin':          'https://app.upshift.finance',
+      'sec-fetch-site':  'same-origin',
+      'sec-fetch-mode':  'cors',
+    }),
 
-  // 4. APR calculado para os que passam todos os filtros
-  const results = step6_hasApy.map(v => {
-    const baseApy    = Number(v.apy?.apy ?? 0)
-    const campaignApy = Number(v.apy?.campaignApy ?? 0)
-    const totalApy   = baseApy + (campaignApy > 0 ? campaignApy : 0)
-    const apr        = Math.min(apyToApr(totalApy / 100) * 100, 500)
-    return {
-      name: v.name,
-      address: v.address,
-      baseApy,
-      campaignApy,
-      totalApy,
-      apr,
-      depositAssets: (v.depositAssets ?? []).map((a: any) => a.symbol),
-    }
-  })
+    // Tentar outros endpoints com os mesmos headers
+    tryHeaders('sdk/vaults-metadata with headers', {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Referer':    'https://app.upshift.finance/',
+      'Origin':     'https://app.upshift.finance',
+    }),
+  ])
+
+  // Ultimo item foi o vaults-metadata, separar
+  const vaultsMetadata = results.pop()
 
   return NextResponse.json({
-    fetchStatus,
-    totalVaults: vaults.length,
-    filters: {
-      step1_monad:    step1_monad.map(v => ({ name: v.name, chainId: v.chainId })),
-      step2_active:   step2_active.map(v => ({ name: v.name, status: v.status })),
-      step3_visible:  step3_visible.map(v => ({ name: v.name, isVisible: v.isVisible })),
-      step4_tvl:      step4_tvl.map(v => ({ name: v.name, tvl: v.latest_reported_tvl })),
-      step5_noIgnore: step5_noIgnore.map(v => ({ name: v.name, address: v.address })),
-      step6_hasApy:   step6_hasApy.map(v => ({ name: v.name, apy: v.apy?.apy })),
-    },
-    finalResults: results,
+    timestamp: new Date().toISOString(),
+    proxyVaults: results,
+    sdkMetadata: { ...vaultsMetadata, url: 'https://app.upshift.finance/api/sdk/vaults-metadata' },
   })
 }
