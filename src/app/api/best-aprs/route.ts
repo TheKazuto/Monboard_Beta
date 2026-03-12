@@ -591,16 +591,36 @@ async function fetchERC4626Vaults<T extends VaultMeta>(
   } catch { return [] }
 }
 
-// ─── MAGMA — gMON APR via on-chain ERC4626 pricePerShare delta ───────────────
-// gMON (0x8498312A6B3CbD158bf0c93AbdCF29E6e4F55081) implements convertToAssets
-// and has enough block history for 7d delta. Confirmed working via debug route.
-// GraphQL at magma-http-app.fly.dev/graphql returns 500 — not used.
+// ─── MAGMA — gMON APR via GraphQL ────────────────────────────────────────────
+// Endpoint requires Origin: https://magmastaking.xyz — returns CORS 500 without it.
+// APY formula (reverse-engineered from magmastaking.xyz bundle):
+//   APY = 13% base + (19_200_000 / tvlInMON * 100)
+//   tvlInMON = tvlMats[0].sum / 1e18  (BigInt, 18 decimals)
+// APY → APR via daily compounding, capped at 500%.
 
 async function fetchMagmaOnchain(): Promise<any> {
   try {
-    const GMON = '0x8498312A6B3CbD158bf0c93AbdCF29E6e4F55081'
-    const currentBlock = await getBlockNumber()
-    const apr = await getVaultApr(GMON, currentBlock)
+    const res = await fetch('https://magma-http-app.fly.dev/graphql', {
+      method: 'POST',
+      signal: AbortSignal.timeout(8_000),
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': 'https://magmastaking.xyz',
+        'Referer': 'https://magmastaking.xyz/',
+      },
+      body: JSON.stringify({ query: '{ tvlMats { sum } }' }),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    const raw = data?.data?.tvlMats?.[0]?.sum
+    if (!raw) return null
+
+    const tvlInMON = Number(BigInt(raw)) / 1e18
+    if (tvlInMON <= 0) return null
+
+    const apy = 13 + (19_200_000 / tvlInMON * 100)   // % APY
+    const apr = Math.min(365 * (Math.pow(1 + apy / 100, 1 / 365) - 1) * 100, 500)
     return apr > 0 ? { apr } : null
   } catch { return null }
 }
