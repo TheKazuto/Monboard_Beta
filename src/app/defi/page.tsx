@@ -343,7 +343,6 @@ const PROTOCOLS = [
   { name: 'Magma',          url: 'https://magmastaking.xyz',              logo: '🐲' },
   { name: 'shMonad',        url: 'https://shmonad.xyz',                   logo: '⚡' },
   { name: 'Lagoon',         url: 'https://app.lagoon.finance',            logo: '🏝️' },
-  { name: 'Renzo',          url: 'https://app.renzoprotocol.com',         logo: '🔴' },
   { name: 'Kuru',           url: 'https://www.kuru.io/',                  logo: '🌀' },
   { name: 'Curvance',       url: 'https://app.curvance.com',              logo: '💎' },
   { name: 'Euler V2',       url: 'https://app.euler.finance',             logo: '📐' },
