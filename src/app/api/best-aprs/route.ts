@@ -351,7 +351,8 @@ async function fetchLagoon(): Promise<AprEntry[]> {
     const entries: AprEntry[] = []
     for (let i = 0; i < vaults.length; i++) {
       const vault = vaults[i]
-      const aprData = aprResults[i].status === 'fulfilled' ? aprResults[i].value : null
+      const aprResult = aprResults[i]
+      const aprData = aprResult.status === 'fulfilled' ? (aprResult as PromiseFulfilledResult<any>).value : null
       if (!aprData) continue
 
       const s = aprData.state ?? {}
