@@ -2,85 +2,89 @@ import { NextResponse } from 'next/server'
 
 export const revalidate = 0
 
-const GQL = 'https://kintsu.xyz/api/graphql'
+const MONAD_RPC = 'https://rpc.monad.xyz'
+const BLOCKS_PER_DAY = 172_800
 
-const QUERY = `{
-  Protocol_LST_Analytics_Day(
-    where: { chainId: { _eq: 143 } }
-    order_by: { date: desc }
-    limit: 8
-  ) { date totalRewards totalPooledStaked }
-}`
-
-async function tryGql(label: string, headers: Record<string, string>, body: any) {
-  try {
-    const res = await fetch(GQL, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8_000),
-      cache: 'no-store',
-    })
-    let data: any = null
-    const text = await res.text()
-    try { data = JSON.parse(text) } catch { data = text.slice(0, 300) }
-    return { label, status: res.status, ok: res.ok, data }
-  } catch (e: any) {
-    return { label, status: 0, ok: false, data: e.message }
-  }
+async function rpcCall(to: string, data: string, block: string = 'latest') {
+  const res = await fetch(MONAD_RPC, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to, data }, block] }),
+    signal: AbortSignal.timeout(6_000),
+    cache: 'no-store',
+  }).then(r => r.json())
+  return res?.result ?? null
 }
 
-// Tentar também GET para ver se há endpoint REST
-async function tryGet(label: string, url: string) {
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(8_000),
-      cache: 'no-store',
-      headers: { 'Accept': 'application/json' },
-    })
-    let data: any = null
-    try { data = await res.json() } catch { data = await res.text().catch(() => null) }
-    return { label, status: res.status, ok: res.ok, data: JSON.stringify(data)?.slice(0, 500) }
-  } catch (e: any) {
-    return { label, status: 0, ok: false, data: e.message }
+async function getBlockNumber() {
+  const res = await fetch(MONAD_RPC, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
+    signal: AbortSignal.timeout(5_000),
+    cache: 'no-store',
+  }).then(r => r.json())
+  return parseInt(res?.result, 16)
+}
+
+const PAD18 = '0000000000000000000000000000000000000000000000000de0b6b3a7640000'
+const PAD6  = '00000000000000000000000000000000000000000000000000000000000f4240'
+
+const SELECTORS: Record<string, string> = {
+  'convertToAssets(1e18)': '0x07a2d13a' + PAD18,
+  'convertToAssets(1e6)':  '0x07a2d13a' + PAD6,
+  'totalAssets()':         '0x01e1d114',
+  'totalSupply()':         '0x18160ddd',
+  'decimals()':            '0x313ce567',
+  'asset()':               '0x38d52e0f',
+  'getPooledEtherByShares(1e18)': '0x47b714e0' + PAD18, // Lido-style
+  'getRate()':             '0x679aefce', // some LSTs
+}
+
+async function probeAndDelta(name: string, address: string) {
+  const currentBlock = await getBlockNumber()
+  const b1d  = '0x' + Math.max(1, currentBlock - BLOCKS_PER_DAY).toString(16)
+  const b7d  = '0x' + Math.max(1, currentBlock - BLOCKS_PER_DAY * 7).toString(16)
+
+  const probeResults: Record<string, any> = {}
+  for (const [label, data] of Object.entries(SELECTORS)) {
+    const raw = await rpcCall(address, data)
+    if (raw && raw !== '0x' && raw.length > 2) {
+      try {
+        const val18 = Number(BigInt(raw)) / 1e18
+        const val6  = Number(BigInt(raw)) / 1e6
+        probeResults[label] = { raw, as18: val18, as6: val6 }
+      } catch {
+        probeResults[label] = { raw }
+      }
+    } else {
+      probeResults[label] = null
+    }
   }
+
+  // Delta para convertToAssets(1e18) — o seletor mais provável
+  const sel = '0x07a2d13a' + PAD18
+  const [ppsNow, pps1d, pps7d] = await Promise.all([
+    rpcCall(address, sel, 'latest'),
+    rpcCall(address, sel, b1d),
+    rpcCall(address, sel, b7d),
+  ])
+
+  const toNum = (h: string | null) => (h && h !== '0x' && h.length > 2) ? Number(BigInt(h)) / 1e18 : null
+  const now = toNum(ppsNow), d1 = toNum(pps1d), d7 = toNum(pps7d)
+
+  let apr7d = null, apr1d = null
+  if (now && d7) apr7d = ((now - d7) / d7) / 7 * 365 * 100
+  if (now && d1 && now !== d1) apr1d = ((now - d1) / d1) * 365 * 100
+
+  return { name, address, currentBlock, probeResults, delta: { ppsNow: now, pps1d: d1, pps7d: d7, apr7d, apr1d } }
 }
 
 export async function GET() {
-  const results = await Promise.all([
-    // Variações de headers para o GraphQL
-    tryGql('json only', { 'Content-Type': 'application/json' }, { query: QUERY }),
-
-    tryGql('with accept', {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    }, { query: QUERY }),
-
-    tryGql('with browser headers', {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
-      'Origin': 'https://kintsu.xyz',
-      'Referer': 'https://kintsu.xyz/earn',
-    }, { query: QUERY }),
-
-    tryGql('with operationName', {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    }, { query: QUERY, operationName: null, variables: {} }),
-
-    // Tentar Hasura endpoint alternativo (Kintsu usa Hasura pelo formato da query)
-    tryGql('hasura endpoint', {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    }, { query: QUERY }),
-
-    // GET endpoints REST alternativos da Kintsu
-    tryGet('kintsu /api/stats',     'https://kintsu.xyz/api/stats'),
-    tryGet('kintsu /api/apr',       'https://kintsu.xyz/api/apr'),
-    tryGet('kintsu /api/analytics', 'https://kintsu.xyz/api/analytics'),
-    tryGet('kintsu /api/lst',       'https://kintsu.xyz/api/lst'),
+  const [sMon, superMon] = await Promise.all([
+    probeAndDelta('sMON',     '0xa3227c5969757783154c60bf0bc1944180ed81b9'),
+    probeAndDelta('superMON', '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'),
   ])
 
-  return NextResponse.json({ timestamp: new Date().toISOString(), results })
+  return NextResponse.json({ timestamp: new Date().toISOString(), sMon, superMon })
 }
