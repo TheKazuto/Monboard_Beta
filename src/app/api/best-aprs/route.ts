@@ -63,13 +63,16 @@ function apyToApr(apy: number): number {
 }
 
 async function fetchMorpho(): Promise<AprEntry[]> {
+  // Note: supplyAssetsUsd is used to filter out test/garbage markets (permissionless protocol)
+  // Markets with < $500 TVL are excluded — avoids "testwstETH/testWETH" style junk markets
+  // APR cap at 200% guards against extreme utilization edge cases in tiny markets
   const query = `{
     markets(where:{chainId_in:[143]}, first:100) {
       items {
         uniqueKey
         loanAsset { symbol }
         collateralAsset { symbol }
-        state { supplyApy borrowApy }
+        state { supplyApy borrowApy supplyAssetsUsd }
       }
     }
     vaults(where:{chainId_in:[143]}, first:50) {
@@ -78,7 +81,7 @@ async function fetchMorpho(): Promise<AprEntry[]> {
         name
         symbol
         asset { symbol }
-        state { netApy }
+        state { netApy totalAssetsUsd }
       }
     }
   }`
@@ -93,11 +96,15 @@ async function fetchMorpho(): Promise<AprEntry[]> {
     const out: AprEntry[] = []
 
     for (const m of data?.data?.markets?.items ?? []) {
-      const supplyApy = Number(m.state?.supplyApy ?? 0)
-      const supplyApr = apyToApr(supplyApy) * 100
-      const loanSym   = m.loanAsset?.symbol ?? '?'
-      const collSym   = m.collateralAsset?.symbol
+      const supplyApy    = Number(m.state?.supplyApy ?? 0)
+      const supplyApr    = apyToApr(supplyApy) * 100
+      const supplyUsd    = Number(m.state?.supplyAssetsUsd ?? 0)
+      const loanSym      = m.loanAsset?.symbol ?? '?'
+      const collSym      = m.collateralAsset?.symbol
+      // Skip: zero APR, tiny markets (< $500 TVL = test/garbage), or absurdly high APR (> 200%)
       if (supplyApr < 0.01) continue
+      if (supplyUsd < 500) continue
+      if (supplyApr > 200) continue
       const tokens = collSym ? [collSym, loanSym] : [loanSym]
       const url = m.uniqueKey
         ? `https://app.morpho.org/monad/market?id=${m.uniqueKey}`
@@ -109,10 +116,12 @@ async function fetchMorpho(): Promise<AprEntry[]> {
       })
     }
     for (const v of data?.data?.vaults?.items ?? []) {
-      const netApy = Number(v.state?.netApy ?? 0)
-      const netApr = apyToApr(netApy) * 100
-      const sym    = v.asset?.symbol ?? '?'
+      const netApy    = Number(v.state?.netApy ?? 0)
+      const netApr    = apyToApr(netApy) * 100
+      const totalUsd  = Number(v.state?.totalAssetsUsd ?? 0)
+      const sym       = v.asset?.symbol ?? '?'
       if (netApr < 0.01) continue
+      if (totalUsd < 500) continue  // skip empty/test vaults
       const url = v.address
         ? `https://app.morpho.org/monad/vault?address=${v.address}`
         : 'https://app.morpho.org/monad'
@@ -162,58 +171,35 @@ async function fetchNeverland(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── EULER V2 — vaults via indexer REST API ──────────────────────────────────
-// Source: https://indexer-prod.euler.finance/v2/vault/list?chainId=143
-// supplyApy.totalApy is in % (e.g. 44.98 = 44.98% APY), includes intrinsicApy
-// for LSTs: sMON=17.1% (Kintsu), shMON=15.27% (DefiLlama 30d avg)
-// Deduplication: same assetSymbol + same APY → keep vault with highest TVL
-// (3x sMON vaults at 17.1%, 3x shMON at 15.27% — show only best TVL each)
-const EULER_V2_URL = 'https://indexer-prod.euler.finance/v2/vault/list?chainId=143'
-
+// ─── EULER V2 — vaults (supply APR) ──────────────────────────────────────────
 async function fetchEulerV2(): Promise<AprEntry[]> {
+  const query = `{
+    vaults(where:{chainId:143},first:100) {
+      name
+      asset { symbol }
+      state { supplyApy borrowApy }
+    }
+  }`
   try {
-    const res = await fetch(EULER_V2_URL, {
-      signal: AbortSignal.timeout(10_000),
-      cache: 'no-store',
+    const res = await fetch('https://api.euler.finance/graphql', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(10_000), cache: 'no-store',
     })
     if (!res.ok) return []
     const data = await res.json()
-    const vaults: any[] = data?.items ?? []
-
-    // Deduplicate: same asset + same totalApy → keep highest TVL
-    const seen = new Map<string, any>()
-    for (const v of vaults) {
-      const totalApy = Number(v.supplyApy?.totalApy ?? 0)
-      if (totalApy <= 0) continue
-      if ((v.totalAssetsUSD ?? 0) < 100) continue
-
-      const key = `${v.assetSymbol}:${totalApy.toFixed(4)}`
-      const existing = seen.get(key)
-      if (!existing || (v.totalAssetsUSD ?? 0) > (existing.totalAssetsUSD ?? 0)) {
-        seen.set(key, v)
-      }
-    }
-
-    const entries: AprEntry[] = []
-    for (const v of seen.values()) {
-      const totalApy = Number(v.supplyApy?.totalApy ?? 0)
-      // totalApy is in % → convert APY% to APR% with daily compounding
-      const apr = Math.min(apyToApr(totalApy / 100) * 100, 500)
-      if (apr < 0.01) continue
-
-      const sym = v.assetSymbol ?? '?'
-      entries.push({
-        protocol: 'Euler V2',
-        logo: '📐',
-        url: `https://app.euler.finance/vault/${v.vault}?network=monad`,
-        tokens: [sym],
-        label: v.vaultName ?? sym,
-        apr,
-        type: 'lend',
-        isStable: isStable(sym),
+    return (data?.data?.vaults ?? [])
+      .filter((v: any) => Number(v.state?.supplyApy ?? 0) > 0)
+      .map((v: any) => {
+        const sym    = v.asset?.symbol ?? '?'
+        const supApr = Number(v.state?.supplyApy ?? 0) * 100
+        return {
+          protocol: 'Euler V2', logo: '📐', url: 'https://app.euler.finance',
+          tokens: [sym], label: v.name ?? sym,
+          apr: supApr, type: 'lend' as const, isStable: isStable(sym),
+        }
       })
-    }
-    return entries
   } catch { return [] }
 }
 
