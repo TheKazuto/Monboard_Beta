@@ -712,13 +712,7 @@ async function fetchLagoon(user: string): Promise<any[]> {
   } catch { return [] }
 }
 
-// ─── RENZO (ezETH on Monad) ───────────────────────────────────────────────────
-// Renzo integrates with Curvance on Monad; ezETH is bridged
-// Try Renzo API
-async function fetchRenzo(_user: string): Promise<any[]> {
-  // Renzo (ezETH restaking) is not yet deployed on Monad mainnet — returning empty until official launch
-  return []
-}
+
 
 // ─── KURU (CLOB DEX Vault LP positions) ──────────────────────────────────────
 // Official Monad mainnet contracts from monad-crypto/protocols repository:
@@ -949,7 +943,7 @@ export async function GET(req: NextRequest) {
   const [monPriceR] = await Promise.allSettled([getMonPrice()])
   const MON_PRICE = monPriceR.status === 'fulfilled' ? (monPriceR.value as number) : 0
 
-  const [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, kintsuR, magmaR, shmonadR, lagoonR, renzoR, kuruR, curvanceR, eulerR, midasR] =
+  const [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, kintsuR, magmaR, shmonadR, lagoonR, kuruR, curvanceR, eulerR, midasR] =
     await Promise.allSettled([
       fetchNeverland(address),
       fetchMorpho(address),
@@ -962,7 +956,6 @@ export async function GET(req: NextRequest) {
       fetchMagma(address, MON_PRICE),
       fetchShMonad(address, MON_PRICE),
       fetchLagoon(address),
-      fetchRenzo(address),
       fetchKuru(address),
       fetchCurvance(address),
       fetchEulerV2(address),
@@ -977,7 +970,7 @@ export async function GET(req: NextRequest) {
     ...unwrap(nevR), ...unwrap(morphoR), ...unwrap(uniR), ...unwrap(pcakeR),
     ...unwrap(curveR), ...unwrap(gearR), ...unwrap(upshiftR),
     ...unwrap(kintsuR), ...unwrap(magmaR), ...unwrap(shmonadR),
-    ...unwrap(lagoonR), ...unwrap(renzoR), ...unwrap(kuruR),
+    ...unwrap(lagoonR), ...unwrap(kuruR),
     ...unwrap(curvanceR), ...unwrap(eulerR), ...unwrap(midasR),
   ]
 
