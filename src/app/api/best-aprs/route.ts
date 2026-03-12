@@ -271,6 +271,8 @@ async function fetchCurve(): Promise<AprEntry[]> {
       const tvl = Number(item.tvl ?? 0)
       if (tvl < 1_000) continue
 
+      const url = item.depositUrl ?? `https://curve.finance/dex/monad/pools/${item.identifier}/deposit`
+
       // Filter out gauge LP token symbols (end in '-gauge'), keep real asset symbols
       const tokens: string[] = (item.tokens ?? [])
         .filter((t: any) => t.type === 'TOKEN' && !String(t.symbol ?? '').endsWith('-gauge'))
@@ -281,7 +283,6 @@ async function fetchCurve(): Promise<AprEntry[]> {
       // These have generic pool URLs and duplicate the underlying LP pool entry
       if (tokens.length === 1 && !url.includes('/deposit')) continue
 
-      const url = item.depositUrl ?? `https://curve.finance/dex/monad/pools/${item.identifier}/deposit`
       const label = tokens.join(' / ')
 
       entries.push({
