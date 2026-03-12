@@ -667,8 +667,7 @@ const KINTSU_LST_QUERY = `{
 }`
 
 async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
-  // Primary: kintsu.xyz/api/graphql (Hasura) — returns 500 server-side, kept for future recovery.
-  // Fallback: floppy-backup.com/v1/monad/native_apy — returns SMON APY, works without headers.
+  // Primary: kintsu.xyz/api/graphql — returns 500 server-side, kept for future recovery.
   try {
     const res = await fetch(KINTSU_LST_GQL, {
       method: 'POST',
@@ -691,12 +690,12 @@ async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEn
       tokens: ['sMON'], label: 'Staked MON',
       apr, type: 'vault', isStable: false,
     }
-  } catch { /* fall through to Floppy */ }
+  } catch { /* fall through */ }
 
-  // Fallback: floppy-backup native_apy — SMON APY % → APR via daily compounding
-  const smonApy = nativeApyMap.get('SMON') ?? 0
-  if (smonApy > 0) {
-    const apr = Math.min(apyToApr(smonApy / 100) * 100, 100)
+  // Fallback 1: nativeApyMap populated by fetchFloppyNativeApy() (may be empty in production)
+  const smonApyFromMap = nativeApyMap.get('SMON') ?? 0
+  if (smonApyFromMap > 0) {
+    const apr = Math.min(apyToApr(smonApyFromMap / 100) * 100, 100)
     if (apr >= 0.01) return {
       protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
       tokens: ['sMON'], label: 'Staked MON',
@@ -704,7 +703,33 @@ async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEn
     }
   }
 
-  return null
+  // Fallback 2: fetch Floppy directly with browser headers (reliable in all environments)
+  try {
+    const res = await fetch('https://api.floppy-backup.com/v1/monad/native_apy', {
+      signal: AbortSignal.timeout(8_000),
+      cache: 'no-store',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Origin': 'https://app.floppy.fi',
+        'Referer': 'https://app.floppy.fi/',
+      },
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    const entry = (data.native_apy ?? []).find((e: any) =>
+      String(e.symbol ?? '').toUpperCase() === 'SMON'
+    )
+    const smonApy = Number(entry?.apy ?? 0)
+    if (smonApy <= 0) return null
+    const apr = Math.min(apyToApr(smonApy / 100) * 100, 100)
+    if (apr < 0.01) return null
+    return {
+      protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
+      tokens: ['sMON'], label: 'Staked MON',
+      apr, type: 'vault', isStable: false,
+    }
+  } catch { return null }
 }
 
 // ─── shMONAD — on-chain ERC4626 pricePerShare delta ─────────────────────────
