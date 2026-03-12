@@ -429,11 +429,20 @@ async function fetchKuru(): Promise<AprEntry[]> {
 async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntry[]> {
   try {
     const res = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?items=100&tokenTypes=TOKEN&mainProtocolId=curvance&action=LEND&chainId=143',
-      { signal: AbortSignal.timeout(8_000), cache: 'no-store' }
+      'https://api.merkl.xyz/v4/opportunities?items=100&mainProtocolId=curvance&action=LEND&chainId=143',
+      {
+        signal: AbortSignal.timeout(10_000),
+        cache: 'no-store',
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        },
+      }
     )
     if (!res.ok) return []
-    const data: any[] = await res.json()
+    const raw = await res.json()
+    // Merkl may return plain array or paginated object { data: [...] }
+    const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
     const entries: AprEntry[] = []
 
     for (const opp of data) {
