@@ -1,80 +1,113 @@
 import { NextResponse } from 'next/server'
-import { rpcBatch } from '@/lib/monad'
 
-export const revalidate = 0
-
-const SMON = '0xa3227c5969757783154c60bf0bc1944180ed81b9'
-const ONE_E18 = '0x0000000000000000000000000000000000000000000000000de0b6b3a7640000'
-
-function call(to: string, data: string, id: number) {
-  return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
-}
-function decodeUint(hex: string): string {
-  if (!hex || hex === '0x') return 'empty'
-  try { return BigInt(hex).toString() } catch { return 'decode_error' }
-}
-function decodeAddr(hex: string): string {
-  if (!hex || hex.length < 66) return 'empty'
-  return '0x' + hex.slice(-40)
-}
+export const runtime = 'edge'
 
 export async function GET() {
-  const probes = [
-    // Standard ERC4626
-    { name: 'convertToAssets(1e18)',   data: '0x07a2d13a' + ONE_E18.slice(2) },
-    { name: 'previewRedeem(1e18)',     data: '0x4cdad506' + ONE_E18.slice(2) },
-    { name: 'pricePerShare()',         data: '0x99530b06' },
-    { name: 'exchangeRate()',          data: '0x3ba0b9a9' },
-    { name: 'getRate()',               data: '0x679aefce' },
-    // Staking-style
-    { name: 'totalStaked()',           data: '0x817b1cd2' },
-    { name: 'totalDeposited()',        data: '0x7d7c2a1c' },
-    { name: 'totalPooledMon()',        data: '0x8fdc0f37' },
-    { name: 'totalSupply()',           data: '0x18160ddd' },
-    { name: 'totalAssets()',           data: '0x01e1d114' },
-    { name: 'asset()',                 data: '0x38d52e0f' },
-    // Reward rate
-    { name: 'rewardRate()',            data: '0x7b0a47ee' },
-    { name: 'getRewardRate()',         data: '0xf1aa4b11' },
-    { name: 'annualizedYield()',       data: '0x0748e136' },
-    { name: 'stakingApr()',            data: '0x5fa96e24' },
-    { name: 'apr()',                   data: '0x5a46b00a' },
-    { name: 'apy()',                   data: '0x1f1fcd51' },
-    // Analytics
-    { name: 'getPooledMonByShares(1e18)', data: '0x7a28fb88' + ONE_E18.slice(2) },
-    { name: 'sharesToAssets(1e18)',    data: '0xd29428b6' + ONE_E18.slice(2) },
-    { name: 'assetsPerShare()',        data: '0xe6f1daf2' },
-  ]
+  const results: any = {}
 
-  const requests = probes.map((p, i) => call(SMON, p.data, i))
-  const results = await rpcBatch(requests)
-
-  const parsed: Record<string, any> = {}
-  for (let i = 0; i < probes.length; i++) {
-    const res = results[i]
-    const raw = res?.result ?? null
-    let decoded = null
-    if (raw && raw !== '0x' && raw.length > 2) {
-      if (raw.length === 66) {
-        // Could be uint256 or address
-        const asUint = decodeUint(raw)
-        const asAddr = decodeAddr(raw)
-        decoded = { raw, as_uint: asUint, as_addr: asAddr }
-      } else {
-        decoded = { raw: raw.slice(0, 130) + (raw.length > 130 ? '...' : '') }
-      }
+  // Test 1: raw fetch sem headers
+  try {
+    const r = await fetch(
+      'https://api.merkl.xyz/v4/opportunities?items=5&mainProtocolId=curvance&action=LEND&chainId=143',
+      { cache: 'no-store', signal: AbortSignal.timeout(10_000) }
+    )
+    const text = await r.text()
+    results.test1_no_headers = {
+      status: r.status,
+      ok: r.ok,
+      bodyPreview: text.slice(0, 300),
+      isJSON: text.startsWith('[') || text.startsWith('{'),
     }
-    parsed[probes[i].name] = decoded ?? (res?.error ? `error: ${res.error.message}` : 'no_data')
+  } catch (e: any) {
+    results.test1_no_headers = { error: e.message }
   }
 
-  // Also get current block for reference
-  let blockNumber = 'unknown'
+  // Test 2: com browser headers
   try {
-    const blockRes = await rpcBatch([{ jsonrpc: '2.0', id: 99, method: 'eth_blockNumber', params: [] }])
-    blockNumber = String(parseInt(blockRes[0]?.result ?? '0x0', 16))
-  } catch {}
+    const r = await fetch(
+      'https://api.merkl.xyz/v4/opportunities?items=5&mainProtocolId=curvance&action=LEND&chainId=143',
+      {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        },
+      }
+    )
+    const text = await r.text()
+    results.test2_browser_headers = {
+      status: r.status,
+      ok: r.ok,
+      bodyPreview: text.slice(0, 300),
+      isJSON: text.startsWith('[') || text.startsWith('{'),
+    }
+  } catch (e: any) {
+    results.test2_browser_headers = { error: e.message }
+  }
 
-  return NextResponse.json({ contract: SMON, block: blockNumber, probes: parsed }, {
-    headers: { 'Cache-Control': 'no-store' },
-  })
+  // Test 3: parse JSON and count items
+  try {
+    const r = await fetch(
+      'https://api.merkl.xyz/v4/opportunities?items=100&mainProtocolId=curvance&action=LEND&chainId=143',
+      {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(10_000),
+        headers: { 'Accept': 'application/json' },
+      }
+    )
+    const raw = await r.json()
+    const items: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
+    const live = items.filter((x: any) => x.status === 'LIVE' && Number(x.apr ?? 0) > 0)
+    results.test3_parse = {
+      status: r.status,
+      rawType: Array.isArray(raw) ? 'array' : typeof raw,
+      rawTopLevelKeys: Array.isArray(raw) ? null : Object.keys(raw).slice(0, 5),
+      totalItems: items.length,
+      liveWithApr: live.length,
+      firstItem: live[0] ? {
+        name: live[0].name,
+        apr: live[0].apr,
+        status: live[0].status,
+        tokenCount: live[0].tokens?.length,
+      } : null,
+    }
+  } catch (e: any) {
+    results.test3_parse = { error: e.message }
+  }
+
+  // Test 4: check if issue is in the token-finding logic
+  try {
+    const r = await fetch(
+      'https://api.merkl.xyz/v4/opportunities?items=100&mainProtocolId=curvance&action=LEND&chainId=143',
+      { cache: 'no-store', signal: AbortSignal.timeout(10_000) }
+    )
+    const raw = await r.json()
+    const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? [])
+    const entries: any[] = []
+
+    for (const opp of data) {
+      if (opp.status !== 'LIVE') continue
+      const apr = Number(opp.apr ?? 0)
+      if (apr <= 0) continue
+
+      const tokens: any[] = opp.tokens ?? []
+      const underlying =
+        tokens.find((t: any) => !/^c[A-Za-z]/.test(t.symbol ?? '')) ??
+        tokens.find((t: any) => t.verified === true) ??
+        tokens[0]
+      const sym = underlying?.symbol ?? 'TOKEN'
+
+      entries.push({ name: opp.name, apr, sym, tokenSymbols: tokens.map((t: any) => t.symbol) })
+    }
+
+    results.test4_full_logic = {
+      entriesProduced: entries.length,
+      entries: entries.slice(0, 5),
+    }
+  } catch (e: any) {
+    results.test4_full_logic = { error: e.message }
+  }
+
+  return NextResponse.json(results, { headers: { 'Cache-Control': 'no-store' } })
 }
