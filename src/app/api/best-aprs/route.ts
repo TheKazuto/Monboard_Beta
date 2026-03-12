@@ -388,6 +388,56 @@ async function fetchKuru(): Promise<AprEntry[]> {
   return []
 }
 
+// ─── CURVANCE — lending markets via Merkl API ────────────────────────────────
+// API: GET https://api.merkl.xyz/v4/opportunities?items=100&tokenTypes=TOKEN&mainProtocolId=curvance&action=LEND
+// Response: array of opportunities. Fields used: apr (already in %), status, tokens[], name, depositUrl, tvl
+// Token structure: each opportunity has [cToken (wrapper), underlyingToken] or [underlying, cToken]
+//   → underlying is the token whose symbol does NOT start with lowercase "c" (cAUSD, cWMON, cWETH, etc.)
+//   → name format: "Supply <token> to Curvance <market> market" → extract market via regex
+async function fetchCurvance(): Promise<AprEntry[]> {
+  try {
+    const res = await fetch(
+      'https://api.merkl.xyz/v4/opportunities?items=100&tokenTypes=TOKEN&mainProtocolId=curvance&action=LEND&chainId=143',
+      { signal: AbortSignal.timeout(8_000), cache: 'no-store' }
+    )
+    if (!res.ok) return []
+    const data: any[] = await res.json()
+    const entries: AprEntry[] = []
+
+    for (const opp of data) {
+      if (opp.status !== 'LIVE') continue
+      const apr = Number(opp.apr ?? 0)
+      if (apr <= 0) continue
+
+      // Underlying = verified token OR token whose symbol doesn't start with lowercase 'c'
+      // Curvance wrappers always have symbol starting with 'c': cAUSD, cWMON, cWETH, cearnAUSD, cYZM, etc.
+      const tokens: any[] = opp.tokens ?? []
+      const underlying =
+        tokens.find((t: any) => t.verified === true) ??
+        tokens.find((t: any) => !/^c[A-Z]/.test(t.symbol ?? '')) ??
+        tokens[0]
+      const tokenSymbol = underlying?.symbol ?? 'TOKEN'
+      const isStable = ['USDC','AUSD','USDT','USDT0','DAI','earnAUSD','sAUSD'].includes(tokenSymbol)
+
+      // Extract market name from "Supply X to Curvance <MARKET> market"
+      const marketMatch = (opp.name as string)?.match(/Curvance (.+?) market/)
+      const label = marketMatch ? `Curvance ${marketMatch[1]}` : (opp.name ?? `Curvance ${tokenSymbol}`)
+
+      entries.push({
+        protocol: 'Curvance',
+        logo: '🔵',
+        url: opp.depositUrl ?? 'https://app.curvance.com',
+        tokens: [tokenSymbol],
+        label,
+        apr,
+        type: 'lending',
+        isStable,
+      })
+    }
+    return entries
+  } catch { return [] }
+}
+
 // ─── MIDAS — tokenized RWAs (known fixed APRs) ────────────────────────────────
 // Last verified: 2025-05 — update if rates change on midas.app
 function getMidas(): AprEntry[] {
@@ -845,7 +895,7 @@ async function fetchGearbox(): Promise<AprEntry[]> {
 
 // ─── Fetch all data (used by cache) ──────────────────────────────────────────
 async function fetchAllData() {
-  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR, kintsuVaultR, upshiftR, gearboxR] =
+  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR, kintsuVaultR, upshiftR, gearboxR, curvanceR] =
     await Promise.allSettled([
       fetchMorpho(),
       fetchNeverland(),
@@ -859,6 +909,7 @@ async function fetchAllData() {
       fetchKintsuVault(),
       fetchUpshift(),
       fetchGearbox(),
+      fetchCurvance(),
     ])
 
   function unwrap(r: PromiseSettledResult<AprEntry[]>): AprEntry[] {
@@ -878,6 +929,7 @@ async function fetchAllData() {
     ...unwrap(kintsuVaultR),
     ...unwrap(upshiftR),
     ...unwrap(gearboxR),
+    ...unwrap(curvanceR),
     ...getMidas(),
   ].filter(e => e.apr > 0)
 
