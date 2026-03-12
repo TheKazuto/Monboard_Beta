@@ -2,84 +2,85 @@ import { NextResponse } from 'next/server'
 
 export const revalidate = 0
 
-const KINTSU_LST_GQL = 'https://kintsu.xyz/api/graphql'
-const KINTSU_VAULT_ADDRESS = '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'
+const GQL = 'https://kintsu.xyz/api/graphql'
 
-export async function GET() {
-  // 1. sMON — GraphQL
-  let gqlRaw: any = null
-  let gqlStatus = 0
-  let gqlError: string | null = null
+const QUERY = `{
+  Protocol_LST_Analytics_Day(
+    where: { chainId: { _eq: 143 } }
+    order_by: { date: desc }
+    limit: 8
+  ) { date totalRewards totalPooledStaked }
+}`
+
+async function tryGql(label: string, headers: Record<string, string>, body: any) {
   try {
-    const res = await fetch(KINTSU_LST_GQL, {
+    const res = await fetch(GQL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: `{
-        Protocol_LST_Analytics_Day(
-          where: { chainId: { _eq: 143 } }
-          order_by: { date: desc }
-          limit: 8
-        ) { date totalRewards totalPooledStaked }
-      }` }),
+      headers,
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(8_000),
       cache: 'no-store',
     })
-    gqlStatus = res.status
-    gqlRaw = await res.json()
-  } catch (e: any) { gqlError = e.message }
-
-  // Calcular APR se tiver dados
-  let sMonApr: number | null = null
-  const rows: any[] = gqlRaw?.data?.Protocol_LST_Analytics_Day ?? []
-  if (rows.length >= 8) {
-    const delta = Number(rows[0].totalRewards) - Number(rows[7].totalRewards)
-    const tvlAvg = rows.slice(0, 7).reduce((s: number, r: any) => s + Number(r.totalPooledStaked), 0) / 7
-    sMonApr = (delta / tvlAvg) / 7 * 365 * 100
+    let data: any = null
+    const text = await res.text()
+    try { data = JSON.parse(text) } catch { data = text.slice(0, 300) }
+    return { label, status: res.status, ok: res.ok, data }
+  } catch (e: any) {
+    return { label, status: 0, ok: false, data: e.message }
   }
+}
 
-  // 2. superMON vault — Upshift proxy
-  let proxyRaw: any = null
-  let proxyStatus = 0
-  let proxyError: string | null = null
-  let vaultFound: any = null
+// Tentar também GET para ver se há endpoint REST
+async function tryGet(label: string, url: string) {
   try {
-    const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(8_000),
+      cache: 'no-store',
+      headers: { 'Accept': 'application/json' },
     })
-    proxyStatus = res.status
-    if (res.ok) {
-      const data = await res.json()
-      const vaults: any[] = data?.data ?? []
-      vaultFound = vaults.find(
-        (v: any) => (v.address ?? '').toLowerCase() === KINTSU_VAULT_ADDRESS.toLowerCase()
-      ) ?? null
-      proxyRaw = { totalVaults: vaults.length, monadVaults: vaults.filter((v:any) => v.chainId === 143).map((v:any) => ({ name: v.name, address: v.address, historical_apy: v.historical_apy })) }
-    }
-  } catch (e: any) { proxyError = e.message }
-
-  let superMonApr: number | null = null
-  if (vaultFound) {
-    const hist = vaultFound.historical_apy ?? {}
-    const apyDecimal = hist['7'] ?? hist['30'] ?? null
-    if (typeof apyDecimal === 'number' && apyDecimal > 0) {
-      superMonApr = Math.min(365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100, 200)
-    }
+    let data: any = null
+    try { data = await res.json() } catch { data = await res.text().catch(() => null) }
+    return { label, status: res.status, ok: res.ok, data: JSON.stringify(data)?.slice(0, 500) }
+  } catch (e: any) {
+    return { label, status: 0, ok: false, data: e.message }
   }
+}
 
-  return NextResponse.json({
-    timestamp: new Date().toISOString(),
-    sMON: {
-      gqlStatus, gqlError,
-      rowsReturned: rows.length,
-      first: rows[0] ?? null,
-      last: rows[7] ?? null,
-      calculatedApr: sMonApr,
-    },
-    superMON: {
-      proxyStatus, proxyError,
-      proxyRaw,
-      vaultFound: vaultFound ? { name: vaultFound.name, address: vaultFound.address, historical_apy: vaultFound.historical_apy } : null,
-      calculatedApr: superMonApr,
-    },
-  })
+export async function GET() {
+  const results = await Promise.all([
+    // Variações de headers para o GraphQL
+    tryGql('json only', { 'Content-Type': 'application/json' }, { query: QUERY }),
+
+    tryGql('with accept', {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    }, { query: QUERY }),
+
+    tryGql('with browser headers', {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
+      'Origin': 'https://kintsu.xyz',
+      'Referer': 'https://kintsu.xyz/earn',
+    }, { query: QUERY }),
+
+    tryGql('with operationName', {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    }, { query: QUERY, operationName: null, variables: {} }),
+
+    // Tentar Hasura endpoint alternativo (Kintsu usa Hasura pelo formato da query)
+    tryGql('hasura endpoint', {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    }, { query: QUERY }),
+
+    // GET endpoints REST alternativos da Kintsu
+    tryGet('kintsu /api/stats',     'https://kintsu.xyz/api/stats'),
+    tryGet('kintsu /api/apr',       'https://kintsu.xyz/api/apr'),
+    tryGet('kintsu /api/analytics', 'https://kintsu.xyz/api/analytics'),
+    tryGet('kintsu /api/lst',       'https://kintsu.xyz/api/lst'),
+  ])
+
+  return NextResponse.json({ timestamp: new Date().toISOString(), results })
 }
