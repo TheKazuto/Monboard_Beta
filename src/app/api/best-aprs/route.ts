@@ -229,7 +229,7 @@ async function fetchCurve(): Promise<AprEntry[]> {
   const BLOCKS_24H = 195_000 // Monad ~0.44s/block
 
   try {
-    // Pool list + block number (parallel) — removed unused DeFiLlama fetch
+    // Pool list + block number (parallel)
     const [r1, r2, bnRes] = await Promise.all([
       fetch(`${BASE}/getPools/monad/factory-twocrypto`,  { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch(`${BASE}/getPools/monad/factory-stable-ng`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
@@ -288,9 +288,6 @@ async function fetchCurve(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── UPSHIFT — vaults via REST API (fallback: ERC4626 on-chain) ──────────────
-const UPSHIFT_KNOWN_STABLECOINS = new Set(['AUSD', 'USDC', 'USDT', 'USDT0', 'DAI', 'FRAX'])
-
 // ─── UPSHIFT — vaults via /api/proxy/vaults ──────────────────────────────────
 // Source: https://app.upshift.finance/api/proxy/vaults
 // Filtros: chainId=143, status=active, isVisible=true, tvl>1000, apy.apy>0
@@ -299,6 +296,7 @@ const UPSHIFT_KNOWN_STABLECOINS = new Set(['AUSD', 'USDC', 'USDT', 'USDT0', 'DAI
 // superMON (0x792C) ignorado — mesmo vault coberto pelo Kintsu
 // Sem fallback on-chain: vaults usam ABI customizada (August protocol), não ERC4626
 
+const UPSHIFT_KNOWN_STABLECOINS = new Set(['AUSD', 'USDC', 'USDT', 'USDT0', 'DAI', 'FRAX'])
 const UPSHIFT_PROXY_URL = 'https://app.upshift.finance/api/proxy/vaults'
 const UPSHIFT_IGNORE    = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c']) // superMON = Kintsu
 
@@ -315,26 +313,21 @@ async function fetchUpshift(): Promise<AprEntry[]> {
 
     const out: AprEntry[] = []
     for (const v of vaults) {
-      // Filtros básicos
       if (v.chainId !== 143) continue
       if (v.status !== 'active') continue
       if (!v.isVisible) continue
       if ((v.latest_reported_tvl ?? 0) < 1_000) continue
       if (UPSHIFT_IGNORE.has((v.address ?? '').toLowerCase())) continue
 
-      // APY em % (ex: 14.0 = 14%). null = sem dados → skip
       const baseApy = Number(v.apy?.apy ?? 0)
       if (baseApy <= 0) continue
 
-      // campaignApy são incentivos extras (também em %)
       const campaignApy = Number(v.apy?.campaignApy ?? 0)
       const totalApy    = baseApy + (campaignApy > 0 ? campaignApy : 0)
 
-      // APY % → APR % com daily compounding
       const apr = Math.min(apyToApr(totalApy / 100) * 100, 500)
       if (apr < 0.01) continue
 
-      // Tokens de depósito
       const depositSymbols: string[] = (v.depositAssets ?? []).map((a: any) => a.symbol).filter(Boolean)
       const tokens = depositSymbols.length > 0 ? depositSymbols : ['?']
       const stable = tokens.every((t: string) => UPSHIFT_KNOWN_STABLECOINS.has(t))
@@ -353,6 +346,7 @@ async function fetchUpshift(): Promise<AprEntry[]> {
     return out
   } catch { return [] }
 }
+
 // ─── LAGOON — vaults ──────────────────────────────────────────────────────────
 // API: GET /api/vaults?chainId=143&... → list vaults
 //      GET /api/vault-apr?chainId=143&address=X → APR per vault
@@ -368,7 +362,6 @@ async function fetchLagoon(): Promise<AprEntry[]> {
     const vaults: any[] = listData?.vaults ?? []
     if (!vaults.length) return []
 
-    // Fetch APR for each vault in parallel
     const aprResults = await Promise.allSettled(
       vaults.map(v =>
         fetch(`https://app.lagoon.finance/api/vault-apr?chainId=143&address=${v.address}`, {
@@ -440,21 +433,17 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
 
       // Curvance wrappers always start with lowercase 'c' + letter: cAUSD, cWMON, cearnAUSD, cYZM, cUSDC
       // Underlying tokens never start with 'c': AUSD, WMON, earnAUSD, YZM, USDC, WETH, syzUSD, etc.
-      // Priority: (1) non-wrapper by symbol pattern, (2) verified=true among remaining, (3) first token
       const tokens: any[] = opp.tokens ?? []
       const underlying =
         tokens.find((t: any) => !/^c[A-Za-z]/.test(t.symbol ?? '')) ??
         tokens.find((t: any) => t.verified === true) ??
         tokens[0]
       const tokenSymbol = underlying?.symbol ?? 'TOKEN'
-      const isStable = ['USDC','AUSD','USDT','USDT0','DAI','earnAUSD','sAUSD'].includes(tokenSymbol)
+      const isStableToken = ['USDC','AUSD','USDT','USDT0','DAI','earnAUSD','sAUSD'].includes(tokenSymbol)
 
-      // Extract market name from "Supply X to Curvance <MARKET> market"
       const marketMatch = (opp.name as string)?.match(/Curvance (.+?) market/)
       const label = marketMatch ? `Curvance ${marketMatch[1]}` : (opp.name ?? `Curvance ${tokenSymbol}`)
 
-      // nativeApyMap from floppy-backup is empty (API returns 403 server-side)
-      // keeping the param for future use when a working source is found
       const nativeApy = nativeApyMap.get(tokenSymbol.toUpperCase()) ?? 0
       const nativeApr = nativeApy > 0 ? apyToApr(nativeApy / 100) * 100 : 0
 
@@ -466,28 +455,59 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
         label,
         apr: apr + nativeApr,
         type: 'lend',
-        isStable,
+        isStable: isStableToken,
       })
     }
     return entries
   } catch { return [] }
 }
 
-// ─── MIDAS — tokenized RWAs (known fixed APRs) ────────────────────────────────
-// Last verified: 2025-05 — update if rates change on midas.app
-function getMidas(): AprEntry[] {
-  return [
-    {
-      protocol: 'Midas', logo: '🏛️', url: 'https://midas.app',
-      tokens: ['mTBILL'], label: 'Tokenized US T-Bills',
-      apr: 4.8, type: 'vault', isStable: true,
-    },
-    {
-      protocol: 'Midas', logo: '🏛️', url: 'https://midas.app',
-      tokens: ['mBASIS'], label: 'Basis Trading Strategy',
-      apr: 7.2, type: 'vault', isStable: false,
-    },
-  ]
+// ─── MIDAS — tokenized RWAs via live API ──────────────────────────────────────
+// Source: https://api-prod.midas.app/api/marketplace/products
+// apy.value7d is a decimal (e.g. 0.1386 = 13.86% APY) — convert to APR with daily compounding
+// Filter: tvl.usd >= 100_000 and at least one non-zero APY value
+// No network filter — RWA products are multi-chain, accessible regardless of deployment chain
+async function fetchMidas(): Promise<AprEntry[]> {
+  try {
+    const res = await fetch('https://api-prod.midas.app/api/marketplace/products', {
+      signal: AbortSignal.timeout(10_000),
+      cache: 'no-store',
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    const products: any[] = data?.products ?? []
+    if (!Array.isArray(products) || products.length === 0) return []
+
+    const out: AprEntry[] = []
+    for (const p of products) {
+      const tvlUsd  = Number(p.tvl?.usd ?? 0)
+      const apy7d   = Number(p.apy?.value7d  ?? 0)
+      const apy30d  = Number(p.apy?.value30d ?? 0)
+      const apy     = apy7d > 0 ? apy7d : apy30d   // prefer 7d, fall back to 30d
+
+      if (tvlUsd < 100_000) continue   // skip illiquid / undeployed products
+      if (apy <= 0) continue           // skip zero-yield
+
+      // APY decimal → APR % (daily compounding)
+      const apr = Math.min(apyToApr(apy) * 100, 200)
+      if (apr < 0.01) continue
+
+      const symbol = String(p.symbol ?? '')
+      const name   = String(p.name   ?? symbol)
+
+      out.push({
+        protocol: 'Midas',
+        logo: '🏛️',
+        url: `https://app.midas.app`,
+        tokens: [symbol],
+        label: name,
+        apr,
+        type: 'vault',
+        isStable: isStable(symbol),
+      })
+    }
+    return out
+  } catch { return [] }
 }
 
 // ─── ON-CHAIN ERC4626 APR HELPER ─────────────────────────────────────────────
@@ -728,7 +748,6 @@ async function fetchUniswap(): Promise<AprEntry[]> {
   const GW = 'https://interface.gateway.uniswap.org/v1/graphql'
   const headers = { 'Content-Type': 'application/json', 'Origin': 'https://app.uniswap.org' }
 
-  // Query V3 and V4 in one request; if GW rejects the combined query, each field is still optional
   const query = `{
     topV3Pools(chain: MONAD, first: 100) {
       address feeTier
@@ -754,7 +773,6 @@ async function fetchUniswap(): Promise<AprEntry[]> {
     })
     if (!res.ok) return []
     const json = await res.json()
-    // GraphQL may return partial data with errors — use whatever fields came back
     const v3 = json?.data?.topV3Pools ?? []
     const v4 = json?.data?.topV4Pools ?? []
     return [
@@ -797,7 +815,6 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
     ])
     if (!poolsRes.ok) return []
     const data = await poolsRes.json()
-    // API may return { rows: [...] } or just an array, or { data: { rows: [...] } }
     const rows: any[] = data?.rows ?? data?.data?.rows ?? (Array.isArray(data) ? data : [])
     const out: AprEntry[] = []
     for (const p of rows) {
@@ -831,6 +848,7 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
 // Nota: Upshift pode retornar 429 — nesse caso retorna [].
 
 const KINTSU_VAULT_ADDRESS = '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'
+
 async function fetchKintsuVault(): Promise<AprEntry[]> {
   try {
     const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
@@ -897,7 +915,6 @@ async function fetchGearboxExtraApy(): Promise<Map<string, number>> {
     for (const entry of pools) {
       const addr = (entry?.pool ?? '').toLowerCase()
       const extraAPY: any[] = entry?.rewards?.extraAPY ?? []
-      // Sum all active incentive programs (filter expired by endTimestamp)
       const total = extraAPY
         .filter((e: any) => !e.endTimestamp || e.endTimestamp > now)
         .reduce((sum: number, e: any) => sum + (Number(e.apy) || 0), 0)
@@ -957,7 +974,7 @@ async function fetchAllData() {
   // Fetch native APY map first (fast, ~100ms) — shared by LST vaults + Curvance
   const nativeApyMap = await fetchFloppyNativeApy()
 
-  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR, kintsuVaultR, upshiftR, gearboxR, curvanceR] =
+  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR, kintsuVaultR, upshiftR, gearboxR, curvanceR, midasR] =
     await Promise.allSettled([
       fetchMorpho(),
       fetchNeverland(),
@@ -972,6 +989,7 @@ async function fetchAllData() {
       fetchUpshift(),
       fetchGearbox(),
       fetchCurvance(nativeApyMap),
+      fetchMidas(),
     ])
 
   function unwrap(r: PromiseSettledResult<AprEntry[]>): AprEntry[] {
@@ -992,7 +1010,7 @@ async function fetchAllData() {
     ...unwrap(upshiftR),
     ...unwrap(gearboxR),
     ...unwrap(curvanceR),
-    ...getMidas(),
+    ...unwrap(midasR),
   ].filter(e => e.apr > 0)
 
   const byApr = (a: AprEntry, b: AprEntry) => b.apr - a.apr
