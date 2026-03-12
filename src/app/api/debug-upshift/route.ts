@@ -2,109 +2,85 @@ import { NextResponse } from 'next/server'
 
 export const revalidate = 0
 
-const MONAD_RPC = 'https://rpc.monad.xyz'
-
-async function tryFetch(label: string, url: string, opts?: RequestInit) {
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(8_000),
-      cache: 'no-store',
-      headers: { 'Accept': 'application/json' },
-      ...opts,
-    })
-    let body: any = null
-    try { body = await res.json() } catch { body = await res.text().catch(() => null) }
-    return { label, url, status: res.status, ok: res.ok, body }
-  } catch (e: any) {
-    return { label, url, status: 0, ok: false, body: null, error: e.message }
-  }
+function apyToApr(apy: number): number {
+  return 365 * (Math.pow(1 + apy, 1 / 365) - 1)
 }
 
-// Tentar diferentes seletores no contrato do vault
-async function probeSelectors(name: string, address: string) {
-  const selectors: Record<string, string> = {
-    'totalAssets()':           '0x01e1d114',
-    'totalSupply()':           '0x18160ddd',
-    'convertToAssets(1e18)':   '0x07a2d13a' + '0000000000000000000000000000000000000000000000000de0b6b3a7640000',
-    'convertToAssets(1e6)':    '0x07a2d13a' + '00000000000000000000000000000000000000000000000000000000000f4240',
-    'getPricePerFullShare()':  '0x77c7b8fc',
-    'pricePerShare()':         '0x99530b06',
-    'exchangeRate()':          '0x3ba0b9a9',
-    'sharePrice()':            '0x6dd3d39f',
-    'decimals()':              '0x313ce567',
-    'asset()':                 '0x38d52e0f',
-  }
-  const results: Record<string, any> = {}
-  for (const [label, data] of Object.entries(selectors)) {
-    try {
-      const res = await fetch(MONAD_RPC, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: address, data }, 'latest'] }),
-        signal: AbortSignal.timeout(5_000),
-        cache: 'no-store',
-      }).then(r => r.json())
-      const raw = res?.result
-      results[label] = (raw && raw !== '0x' && raw.length > 2) ? raw : null
-    } catch {
-      results[label] = 'error'
-    }
-  }
-  return { name, address, results }
-}
+const UPSHIFT_IGNORE = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c'])
 
 export async function GET() {
-  const [
-    // Endpoints SDK públicos
-    metadata,
-    aprs,
-    aprsChain,
-    vaults,
-    vaultsChain,
-    yields,
-    yieldsChain,
-    stats,
-    statsChain,
-    tvl,
-    tvlChain,
-    performance,
-    performanceChain,
-    earnAUSDData,
-    earnMONData,
-  ] = await Promise.all([
-    tryFetch('sdk/vaults-metadata',                   'https://app.upshift.finance/api/sdk/vaults-metadata'),
-    tryFetch('sdk/aprs',                              'https://app.upshift.finance/api/sdk/aprs'),
-    tryFetch('sdk/aprs?chainId=143',                  'https://app.upshift.finance/api/sdk/aprs?chainId=143'),
-    tryFetch('sdk/vaults',                            'https://app.upshift.finance/api/sdk/vaults'),
-    tryFetch('sdk/vaults?chainId=143',                'https://app.upshift.finance/api/sdk/vaults?chainId=143'),
-    tryFetch('sdk/yields',                            'https://app.upshift.finance/api/sdk/yields'),
-    tryFetch('sdk/yields?chainId=143',                'https://app.upshift.finance/api/sdk/yields?chainId=143'),
-    tryFetch('sdk/stats',                             'https://app.upshift.finance/api/sdk/stats'),
-    tryFetch('sdk/stats?chainId=143',                 'https://app.upshift.finance/api/sdk/stats?chainId=143'),
-    tryFetch('sdk/tvl',                               'https://app.upshift.finance/api/sdk/tvl'),
-    tryFetch('sdk/tvl?chainId=143',                   'https://app.upshift.finance/api/sdk/tvl?chainId=143'),
-    tryFetch('sdk/performance',                       'https://app.upshift.finance/api/sdk/performance'),
-    tryFetch('sdk/performance?chainId=143',           'https://app.upshift.finance/api/sdk/performance?chainId=143'),
-    // Por endereço específico
-    tryFetch('sdk/vault earnAUSD',                    'https://app.upshift.finance/api/sdk/vaults/0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA'),
-    tryFetch('sdk/vault earnMON',                     'https://app.upshift.finance/api/sdk/vaults/0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C'),
-  ])
+  // 1. Fetch raw
+  let raw: any = null
+  let fetchError: string | null = null
+  let fetchStatus = 0
 
-  // Probe contratos on-chain com múltiplos seletores
-  const contracts = await Promise.all([
-    probeSelectors('earnAUSD', '0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA'),
-    probeSelectors('earnMON',  '0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C'),
-    probeSelectors('sAUSD',    '0xD793c04B87386A6bb84ee61D98e0065FdE7fdA5E'),
-  ])
+  try {
+    const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
+      signal: AbortSignal.timeout(10_000),
+      cache: 'no-store',
+    })
+    fetchStatus = res.status
+    try { raw = await res.json() } catch { raw = await res.text() }
+  } catch (e: any) {
+    fetchError = e.message
+  }
+
+  if (fetchError || !raw) {
+    return NextResponse.json({ fetchStatus, fetchError, raw })
+  }
+
+  const vaults: any[] = raw?.data ?? []
+
+  // 2. Todos os vaults brutos
+  const allVaults = vaults.map(v => ({
+    name:        v.name,
+    address:     v.address,
+    chainId:     v.chainId,
+    status:      v.status,
+    isVisible:   v.isVisible,
+    tvl:         v.latest_reported_tvl,
+    apy:         v.apy,
+    historical:  v.historical_apy,
+    decimals:    v.decimals,
+    depositAssets: (v.depositAssets ?? []).map((a: any) => a.symbol),
+  }))
+
+  // 3. Filtro passo a passo para Monad
+  const step1_monad    = vaults.filter(v => v.chainId === 143)
+  const step2_active   = step1_monad.filter(v => v.status === 'active')
+  const step3_visible  = step2_active.filter(v => v.isVisible === true)
+  const step4_tvl      = step3_visible.filter(v => (v.latest_reported_tvl ?? 0) >= 1_000)
+  const step5_noIgnore = step4_tvl.filter(v => !UPSHIFT_IGNORE.has((v.address ?? '').toLowerCase()))
+  const step6_hasApy   = step5_noIgnore.filter(v => Number(v.apy?.apy ?? 0) > 0)
+
+  // 4. APR calculado para os que passam todos os filtros
+  const results = step6_hasApy.map(v => {
+    const baseApy    = Number(v.apy?.apy ?? 0)
+    const campaignApy = Number(v.apy?.campaignApy ?? 0)
+    const totalApy   = baseApy + (campaignApy > 0 ? campaignApy : 0)
+    const apr        = Math.min(apyToApr(totalApy / 100) * 100, 500)
+    return {
+      name: v.name,
+      address: v.address,
+      baseApy,
+      campaignApy,
+      totalApy,
+      apr,
+      depositAssets: (v.depositAssets ?? []).map((a: any) => a.symbol),
+    }
+  })
 
   return NextResponse.json({
-    timestamp: new Date().toISOString(),
-    sdk_endpoints: {
-      metadata, aprs, aprsChain, vaults, vaultsChain,
-      yields, yieldsChain, stats, statsChain,
-      tvl, tvlChain, performance, performanceChain,
-      earnAUSDData, earnMONData,
+    fetchStatus,
+    totalVaults: vaults.length,
+    filters: {
+      step1_monad:    step1_monad.map(v => ({ name: v.name, chainId: v.chainId })),
+      step2_active:   step2_active.map(v => ({ name: v.name, status: v.status })),
+      step3_visible:  step3_visible.map(v => ({ name: v.name, isVisible: v.isVisible })),
+      step4_tvl:      step4_tvl.map(v => ({ name: v.name, tvl: v.latest_reported_tvl })),
+      step5_noIgnore: step5_noIgnore.map(v => ({ name: v.name, address: v.address })),
+      step6_hasApy:   step6_hasApy.map(v => ({ name: v.name, apy: v.apy?.apy })),
     },
-    contracts,
+    finalResults: results,
   })
 }
