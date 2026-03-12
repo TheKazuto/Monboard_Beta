@@ -493,6 +493,8 @@ async function fetchMidas(): Promise<AprEntry[]> {
 
       if (tvlUsd < 100_000) continue
       if (apy <= 0) continue
+      const networks: string[] = Array.isArray(p.networks) ? p.networks : []
+      if (!networks.includes('evm:monad')) continue   // only show vaults deployed on Monad
 
       const apr = Math.min(apyToApr(apy) * 100, 200)
       if (apr < 0.01) continue
