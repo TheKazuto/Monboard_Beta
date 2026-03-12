@@ -666,8 +666,9 @@ const KINTSU_LST_QUERY = `{
   }
 }`
 
-async function fetchKintsusMON(_nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
-  // floppy-backup API is blocked server-side (403) — try GraphQL first, then hardcode
+async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
+  // Primary: kintsu.xyz/api/graphql (Hasura) — returns 500 server-side, kept for future recovery.
+  // Fallback: floppy-backup.com/v1/monad/native_apy — returns SMON APY, works without headers.
   try {
     const res = await fetch(KINTSU_LST_GQL, {
       method: 'POST',
@@ -676,23 +677,33 @@ async function fetchKintsusMON(_nativeApyMap: Map<string, number>): Promise<AprE
       signal: AbortSignal.timeout(8_000),
       cache: 'no-store',
     })
-    if (!res.ok) return null
+    if (!res.ok) throw new Error(`GraphQL ${res.status}`)
     const json = await res.json()
     const rows: any[] = json?.data?.Protocol_LST_Analytics_Day ?? []
-    if (rows.length < 8) return null
+    if (rows.length < 8) throw new Error('insufficient rows')
     const rewardsDelta = Number(rows[0].totalRewards) - Number(rows[7].totalRewards)
     const tvlAvg = rows.slice(0, 7).reduce((s: number, r: any) => s + Number(r.totalPooledStaked), 0) / 7
-    if (rewardsDelta <= 0 || tvlAvg <= 0) return null
+    if (rewardsDelta <= 0 || tvlAvg <= 0) throw new Error('bad data')
     const apr = Math.min((rewardsDelta / tvlAvg) / 7 * 365 * 100, 100)
-    if (apr < 0.01) return null
+    if (apr < 0.01) throw new Error('apr too low')
     return {
       protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
       tokens: ['sMON'], label: 'Staked MON',
       apr, type: 'vault', isStable: false,
     }
-  } catch { /* GraphQL blocked server-side */ }
-  // Both floppy-backup (403) and kintsu.xyz/api/graphql (500) blocked server-side.
-  // TODO: implement on-chain fallback once sMON contract ABI is confirmed via debug-smon
+  } catch { /* fall through to Floppy */ }
+
+  // Fallback: floppy-backup native_apy — SMON APY % → APR via daily compounding
+  const smonApy = nativeApyMap.get('SMON') ?? 0
+  if (smonApy > 0) {
+    const apr = Math.min(apyToApr(smonApy / 100) * 100, 100)
+    if (apr >= 0.01) return {
+      protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
+      tokens: ['sMON'], label: 'Staked MON',
+      apr, type: 'vault', isStable: false,
+    }
+  }
+
   return null
 }
 
