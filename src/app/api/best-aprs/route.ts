@@ -19,6 +19,7 @@ export interface AprEntry {
 const STABLECOINS = new Set([
   'USDC', 'USDT', 'USDT0', 'AUSD', 'DAI', 'FRAX', 'BUSD',
   'USDC.e', 'mTBILL', 'crvUSD', 'TUSD', 'LUSD', 'MIM', 'USD1', 'LVUSD',
+  'AUSDCT0', // Curve AUSD Compound Token on Monad
 ])
 
 function isStable(sym: string): boolean { return STABLECOINS.has(sym) }
@@ -223,67 +224,75 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── CURVE — pool APRs via virtualPrice delta ────────────────────────────────
+// ─── CURVE — pool APRs via Merkl API ─────────────────────────────────────────
+// Source: https://api.merkl.xyz/v4/opportunities?mainProtocolId=curve&chainId=143...
+// APR field is already a percentage (e.g. 4.57 = 4.57% APR) — no conversion needed.
+// Gauge entries duplicate the underlying pool APR → deduplicate by depositUrl prefix.
+// Tokens: filter out gauge LP tokens (symbols ending in '-gauge').
 async function fetchCurve(): Promise<AprEntry[]> {
-  const BASE       = 'https://api-core.curve.finance/v1'
-  const BLOCKS_24H = 195_000 // Monad ~0.44s/block
+  const MERKL_CURVE = 'https://api.merkl.xyz/v4/opportunities'
+  const params = new URLSearchParams({
+    mainProtocolId: 'curve',
+    chainId: '143',
+    test: 'false',
+    status: 'LIVE',
+    action: 'POOL',
+    items: '100',
+    page: '0',
+  })
 
   try {
-    // Pool list + block number (parallel)
-    const [r1, r2, bnRes] = await Promise.all([
-      fetch(`${BASE}/getPools/monad/factory-twocrypto`,  { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`${BASE}/getPools/monad/factory-stable-ng`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(MONAD_RPC, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_blockNumber', params: [] }),
-        signal: AbortSignal.timeout(4_000),
-      }).then(r => r.json()).catch(() => ({ result: '0x0' })),
-    ])
-
-    const allPools: any[] = [...(r1?.data?.poolData ?? []), ...(r2?.data?.poolData ?? [])]
-    const livePools = allPools.filter(p => Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0) > 100)
-    if (livePools.length === 0) return []
-
-    const currentBlock = Number(BigInt(bnRes?.result ?? '0x0'))
-    // virtualPrice grows as trading fees accumulate → reliable APR proxy
-    const block24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
-    const vpCalls: any[] = []
-    livePools.forEach((p, i) => {
-      vpCalls.push({ jsonrpc: '2.0', id: i * 2,     method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, 'latest']  })
-      vpCalls.push({ jsonrpc: '2.0', id: i * 2 + 1, method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, block24h] })
+    const res = await fetch(`${MERKL_CURVE}?${params}`, {
+      signal: AbortSignal.timeout(10_000),
+      cache: 'no-store',
+      headers: { 'Accept': 'application/json' },
     })
-    const vpRes = await fetch(MONAD_RPC, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(vpCalls),
-      signal: AbortSignal.timeout(12_000),
-    }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => [])
+    if (!res.ok) return []
+    const raw = await res.json()
+    const items: any[] = Array.isArray(raw) ? raw : (raw.data ?? raw.opportunities ?? [])
+
+    // Deduplicate: gauge + pool entries often share the same pool address.
+    // Keep the one with higher APR per unique pool contract address.
+    const byAddress = new Map<string, any>()
+    for (const item of items) {
+      if (item.chainId !== 143) continue
+      const addr = (item.identifier ?? '').toLowerCase()
+      if (!addr) continue
+      const existing = byAddress.get(addr)
+      if (!existing || Number(item.apr ?? 0) > Number(existing.apr ?? 0)) {
+        byAddress.set(addr, item)
+      }
+    }
 
     const entries: AprEntry[] = []
-    livePools.forEach((p, i) => {
-      const tvl = Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0)
-      if (tvl <= 0) return
+    for (const item of byAddress.values()) {
+      const apr = Number(item.apr ?? 0)
+      if (apr < 0.001) continue
+      const tvl = Number(item.tvl ?? 0)
+      if (tvl < 1_000) continue
 
-      const vpNow = vpRes.find((r: any) => r.id === i * 2)?.result ?? '0x'
-      const vpOld = vpRes.find((r: any) => r.id === i * 2 + 1)?.result ?? '0x'
-      let apr = 0
-      if (vpNow && vpNow !== '0x' && vpOld && vpOld !== '0x') {
-        try {
-          const now = Number(BigInt(vpNow)) / 1e18
-          const old = Number(BigInt(vpOld)) / 1e18
-          if (old > 0 && now > old) apr = (Math.pow(now / old, 365) - 1) * 100
-        } catch { /* skip */ }
-      }
+      // Filter out gauge LP token symbols (end in '-gauge'), keep real asset symbols
+      const tokens: string[] = (item.tokens ?? [])
+        .filter((t: any) => t.type === 'TOKEN' && !String(t.symbol ?? '').endsWith('-gauge'))
+        .map((t: any) => String(t.symbol ?? ''))
+        .filter(Boolean)
+      if (tokens.length === 0) continue
+      // Skip gauge-only staking entries (single synthetic token, no real LP pair)
+      // These have generic pool URLs and duplicate the underlying LP pool entry
+      if (tokens.length === 1 && !url.includes('/deposit')) continue
 
-      if (apr < 0.001) return
-      const tokens = (p.coins ?? []).map((c: any) => c.symbol).filter(Boolean)
-      const poolId = p.id ?? p.address
+      const url = item.depositUrl ?? `https://curve.finance/dex/monad/pools/${item.identifier}/deposit`
+      const label = tokens.join(' / ')
+
       entries.push({
         protocol: 'Curve', logo: '🌊',
-        url: `https://curve.finance/dex/monad/pools/${poolId}/deposit`,
-        tokens, label: p.name ?? tokens.join(' / '),
-        apr, type: 'pool' as const, isStable: allStable(tokens),
+        url,
+        tokens, label,
+        apr: Math.min(apr, 500),
+        type: 'pool' as const,
+        isStable: allStable(tokens),
       })
-    })
+    }
     return entries
   } catch { return [] }
 }
