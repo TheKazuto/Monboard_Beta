@@ -394,7 +394,7 @@ async function fetchKuru(): Promise<AprEntry[]> {
 // Token structure: each opportunity has [cToken (wrapper), underlyingToken] or [underlying, cToken]
 //   → underlying is the token whose symbol does NOT start with lowercase "c" (cAUSD, cWMON, cWETH, etc.)
 //   → name format: "Supply <token> to Curvance <market> market" → extract market via regex
-async function fetchCurvance(): Promise<AprEntry[]> {
+async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntry[]> {
   try {
     const res = await fetch(
       'https://api.merkl.xyz/v4/opportunities?items=100&tokenTypes=TOKEN&mainProtocolId=curvance&action=LEND&chainId=143',
@@ -423,14 +423,19 @@ async function fetchCurvance(): Promise<AprEntry[]> {
       const marketMatch = (opp.name as string)?.match(/Curvance (.+?) market/)
       const label = marketMatch ? `Curvance ${marketMatch[1]}` : (opp.name ?? `Curvance ${tokenSymbol}`)
 
+      // Sum Merkl incentive APR + native APY (converted to APR) for the deposited token
+      const nativeApy = nativeApyMap.get(tokenSymbol.toUpperCase()) ?? 0
+      const nativeApr = apyToApr(nativeApy / 100) * 100
+      const totalApr = apr + nativeApr
+
       entries.push({
         protocol: 'Curvance',
         logo: '🔵',
         url: opp.depositUrl ?? 'https://app.curvance.com',
         tokens: [tokenSymbol],
         label,
-        apr,
-        type: 'lending',
+        apr: totalApr,
+        type: 'lend',
         isStable,
       })
     }
@@ -543,6 +548,28 @@ async function fetchMagmaOnchain(): Promise<any> {
   } catch { return null }
 }
 
+// ─── FLOPPY BACKUP — native APY for Monad LST/vault tokens ─────────────────────
+// Source: https://api.floppy-backup.com/v1/monad/native_apy
+// Returns APY (not APR) for: SHMON, SMON, GMON, USDC, SYZUSD, LOAZND, MUBOND
+// Used by: fetchShMonad (SHMON), fetchKintsusMON (SMON), fetchCurvance (USDC + others)
+// APY → APR conversion: daily compounding — APR = ((1 + APY/100)^(1/365) - 1) * 365 * 100
+async function fetchFloppyNativeApy(): Promise<Map<string, number>> {
+  try {
+    const res = await fetch('https://api.floppy-backup.com/v1/monad/native_apy', {
+      signal: AbortSignal.timeout(5_000), cache: 'no-store',
+    })
+    if (!res.ok) return new Map()
+    const data = await res.json()
+    const map = new Map<string, number>()
+    for (const entry of (data.native_apy ?? [])) {
+      const sym = String(entry.symbol ?? '').toUpperCase()
+      const apy = Number(entry.apy ?? 0)
+      if (sym && apy >= 0) map.set(sym, apy)
+    }
+    return map
+  } catch { return new Map() }
+}
+
 // ─── KINTSU sMON — APR via Protocol_LST_Analytics_Day GraphQL ────────────────
 // Source: https://kintsu.xyz/api/graphql (no auth required)
 // APR = (totalRewards delta 7d / avg TVL 7d) / 7 * 365
@@ -562,7 +589,17 @@ const KINTSU_LST_QUERY = `{
   }
 }`
 
-async function fetchKintsusMON(): Promise<AprEntry | null> {
+async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
+  // Primary: floppy-backup API (SMON APY)
+  const smonApy = nativeApyMap.get('SMON') ?? 0
+  if (smonApy > 0) {
+    return {
+      protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
+      tokens: ['sMON'], label: 'Staked MON',
+      apr: apyToApr(smonApy / 100) * 100, type: 'vault', isStable: false,
+    }
+  }
+  // Fallback: GraphQL (blocked server-side by Kintsu, but try anyway)
   try {
     const res = await fetch(KINTSU_LST_GQL, {
       method: 'POST',
@@ -575,15 +612,11 @@ async function fetchKintsusMON(): Promise<AprEntry | null> {
     const json = await res.json()
     const rows: any[] = json?.data?.Protocol_LST_Analytics_Day ?? []
     if (rows.length < 8) return null
-
-    // rows[0] = today, rows[7] = 7 days ago
     const rewardsDelta = Number(rows[0].totalRewards) - Number(rows[7].totalRewards)
     const tvlAvg = rows.slice(0, 7).reduce((s: number, r: any) => s + Number(r.totalPooledStaked), 0) / 7
-
     if (rewardsDelta <= 0 || tvlAvg <= 0) return null
     const apr = Math.min((rewardsDelta / tvlAvg) / 7 * 365 * 100, 100)
     if (apr < 0.01) return null
-
     return {
       protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
       tokens: ['sMON'], label: 'Staked MON',
@@ -597,7 +630,17 @@ async function fetchKintsusMON(): Promise<AprEntry | null> {
 // asset() = 0xeeee...ee (native MON). api.shmonad.xyz is offline (530).
 const SHMON_ADDRESS = '0x1B68626dCa36c7fE922fD2d55E4f631d962dE19c'
 
-async function fetchShMonad(): Promise<AprEntry | null> {
+async function fetchShMonad(nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
+  // Primary: floppy-backup API (SHMON APY) — simpler and more up-to-date than on-chain delta
+  const shmonApy = nativeApyMap.get('SHMON') ?? 0
+  if (shmonApy > 0) {
+    return {
+      protocol: 'shMonad', logo: '⚡', url: 'https://shmonad.xyz',
+      tokens: ['shMON'], label: 'Holistic Staked MON',
+      apr: apyToApr(shmonApy / 100) * 100, type: 'vault', isStable: false,
+    }
+  }
+  // Fallback: on-chain ERC4626 pricePerShare 7d delta
   try {
     const currentBlock = await getBlockNumber()
     const apr = await getVaultApr(SHMON_ADDRESS, currentBlock)
@@ -611,11 +654,11 @@ async function fetchShMonad(): Promise<AprEntry | null> {
 }
 
 // ─── KINTSU, MAGMA, shMONAD — LST staking vaults (parallel) ─────────────────
-async function fetchLSTVaults(): Promise<AprEntry[]> {
+async function fetchLSTVaults(nativeApyMap: Map<string, number>): Promise<AprEntry[]> {
   const [kintsuR, magmaR, shmonadR] = await Promise.allSettled([
-    fetchKintsusMON(),
+    fetchKintsusMON(nativeApyMap),
     fetchMagmaOnchain(),
-    fetchShMonad(),
+    fetchShMonad(nativeApyMap),
   ])
 
   const entries: AprEntry[] = []
@@ -895,6 +938,9 @@ async function fetchGearbox(): Promise<AprEntry[]> {
 
 // ─── Fetch all data (used by cache) ──────────────────────────────────────────
 async function fetchAllData() {
+  // Fetch native APY map first (fast, ~100ms) — shared by LST vaults + Curvance
+  const nativeApyMap = await fetchFloppyNativeApy()
+
   const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR, kintsuVaultR, upshiftR, gearboxR, curvanceR] =
     await Promise.allSettled([
       fetchMorpho(),
@@ -903,13 +949,13 @@ async function fetchAllData() {
       fetchCurve(),
       fetchLagoon(),
       fetchKuru(),
-      fetchLSTVaults(),
+      fetchLSTVaults(nativeApyMap),
       fetchUniswap(),
       fetchPancakeswap(),
       fetchKintsuVault(),
       fetchUpshift(),
       fetchGearbox(),
-      fetchCurvance(),
+      fetchCurvance(nativeApyMap),
     ])
 
   function unwrap(r: PromiseSettledResult<AprEntry[]>): AprEntry[] {
