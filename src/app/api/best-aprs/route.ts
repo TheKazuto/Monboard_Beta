@@ -162,35 +162,58 @@ async function fetchNeverland(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── EULER V2 — vaults (supply APR) ──────────────────────────────────────────
+// ─── EULER V2 — vaults via indexer REST API ──────────────────────────────────
+// Source: https://indexer-prod.euler.finance/v2/vault/list?chainId=143
+// supplyApy.totalApy is in % (e.g. 44.98 = 44.98% APY), includes intrinsicApy
+// for LSTs: sMON=17.1% (Kintsu), shMON=15.27% (DefiLlama 30d avg)
+// Deduplication: same assetSymbol + same APY → keep vault with highest TVL
+// (3x sMON vaults at 17.1%, 3x shMON at 15.27% — show only best TVL each)
+const EULER_V2_URL = 'https://indexer-prod.euler.finance/v2/vault/list?chainId=143'
+
 async function fetchEulerV2(): Promise<AprEntry[]> {
-  const query = `{
-    vaults(where:{chainId:143},first:100) {
-      name
-      asset { symbol }
-      state { supplyApy borrowApy }
-    }
-  }`
   try {
-    const res = await fetch('https://api.euler.finance/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
+    const res = await fetch(EULER_V2_URL, {
+      signal: AbortSignal.timeout(10_000),
+      cache: 'no-store',
     })
     if (!res.ok) return []
     const data = await res.json()
-    return (data?.data?.vaults ?? [])
-      .filter((v: any) => Number(v.state?.supplyApy ?? 0) > 0)
-      .map((v: any) => {
-        const sym    = v.asset?.symbol ?? '?'
-        const supApr = Number(v.state?.supplyApy ?? 0) * 100
-        return {
-          protocol: 'Euler V2', logo: '📐', url: 'https://app.euler.finance',
-          tokens: [sym], label: v.name ?? sym,
-          apr: supApr, type: 'lend' as const, isStable: isStable(sym),
-        }
+    const vaults: any[] = data?.items ?? []
+
+    // Deduplicate: same asset + same totalApy → keep highest TVL
+    const seen = new Map<string, any>()
+    for (const v of vaults) {
+      const totalApy = Number(v.supplyApy?.totalApy ?? 0)
+      if (totalApy <= 0) continue
+      if ((v.totalAssetsUSD ?? 0) < 100) continue
+
+      const key = `${v.assetSymbol}:${totalApy.toFixed(4)}`
+      const existing = seen.get(key)
+      if (!existing || (v.totalAssetsUSD ?? 0) > (existing.totalAssetsUSD ?? 0)) {
+        seen.set(key, v)
+      }
+    }
+
+    const entries: AprEntry[] = []
+    for (const v of seen.values()) {
+      const totalApy = Number(v.supplyApy?.totalApy ?? 0)
+      // totalApy is in % → convert APY% to APR% with daily compounding
+      const apr = Math.min(apyToApr(totalApy / 100) * 100, 500)
+      if (apr < 0.01) continue
+
+      const sym = v.assetSymbol ?? '?'
+      entries.push({
+        protocol: 'Euler V2',
+        logo: '📐',
+        url: `https://app.euler.finance/vault/${v.vault}?network=monad`,
+        tokens: [sym],
+        label: v.vaultName ?? sym,
+        apr,
+        type: 'lend',
+        isStable: isStable(sym),
       })
+    }
+    return entries
   } catch { return [] }
 }
 
