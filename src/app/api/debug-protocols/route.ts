@@ -1,67 +1,80 @@
 import { NextResponse } from 'next/server'
+import { rpcBatch } from '@/lib/monad'
 
 export const revalidate = 0
 
+const SMON = '0xa3227c5969757783154c60bf0bc1944180ed81b9'
+const ONE_E18 = '0x0000000000000000000000000000000000000000000000000de0b6b3a7640000'
+
+function call(to: string, data: string, id: number) {
+  return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
+}
+function decodeUint(hex: string): string {
+  if (!hex || hex === '0x') return 'empty'
+  try { return BigInt(hex).toString() } catch { return 'decode_error' }
+}
+function decodeAddr(hex: string): string {
+  if (!hex || hex.length < 66) return 'empty'
+  return '0x' + hex.slice(-40)
+}
+
 export async function GET() {
-  const results: Record<string, any> = {}
+  const probes = [
+    // Standard ERC4626
+    { name: 'convertToAssets(1e18)',   data: '0x07a2d13a' + ONE_E18.slice(2) },
+    { name: 'previewRedeem(1e18)',     data: '0x4cdad506' + ONE_E18.slice(2) },
+    { name: 'pricePerShare()',         data: '0x99530b06' },
+    { name: 'exchangeRate()',          data: '0x3ba0b9a9' },
+    { name: 'getRate()',               data: '0x679aefce' },
+    // Staking-style
+    { name: 'totalStaked()',           data: '0x817b1cd2' },
+    { name: 'totalDeposited()',        data: '0x7d7c2a1c' },
+    { name: 'totalPooledMon()',        data: '0x8fdc0f37' },
+    { name: 'totalSupply()',           data: '0x18160ddd' },
+    { name: 'totalAssets()',           data: '0x01e1d114' },
+    { name: 'asset()',                 data: '0x38d52e0f' },
+    // Reward rate
+    { name: 'rewardRate()',            data: '0x7b0a47ee' },
+    { name: 'getRewardRate()',         data: '0xf1aa4b11' },
+    { name: 'annualizedYield()',       data: '0x0748e136' },
+    { name: 'stakingApr()',            data: '0x5fa96e24' },
+    { name: 'apr()',                   data: '0x5a46b00a' },
+    { name: 'apy()',                   data: '0x1f1fcd51' },
+    // Analytics
+    { name: 'getPooledMonByShares(1e18)', data: '0x7a28fb88' + ONE_E18.slice(2) },
+    { name: 'sharesToAssets(1e18)',    data: '0xd29428b6' + ONE_E18.slice(2) },
+    { name: 'assetsPerShare()',        data: '0xe6f1daf2' },
+  ]
 
-  // ── 1. Raw Floppy API response ────────────────────────────────────────────
-  try {
-    const res = await fetch('https://api.floppy-backup.com/v1/monad/native_apy', {
-      signal: AbortSignal.timeout(6_000),
-      cache: 'no-store',
-    })
-    results.floppy_status = res.status
-    if (res.ok) {
-      const data = await res.json()
-      results.floppy_raw = data
+  const requests = probes.map((p, i) => call(SMON, p.data, i))
+  const results = await rpcBatch(requests)
 
-      // Build map and compute APR conversions
-      const conversions: Record<string, any> = {}
-      for (const entry of (data.native_apy ?? [])) {
-        const sym = String(entry.symbol ?? '').toUpperCase()
-        const apy = Number(entry.apy ?? 0)
-        // apyToApr: original function expects decimal → result is decimal APR
-        // usage: apyToApr(apy / 100) * 100 → APR in %
-        const aprPct = apy > 0
-          ? (365 * (Math.pow(1 + apy / 100, 1 / 365) - 1)) * 100
-          : 0
-        conversions[sym] = {
-          apy_pct: apy,
-          apr_pct: Number(aprPct.toFixed(4)),
-        }
+  const parsed: Record<string, any> = {}
+  for (let i = 0; i < probes.length; i++) {
+    const res = results[i]
+    const raw = res?.result ?? null
+    let decoded = null
+    if (raw && raw !== '0x' && raw.length > 2) {
+      if (raw.length === 66) {
+        // Could be uint256 or address
+        const asUint = decodeUint(raw)
+        const asAddr = decodeAddr(raw)
+        decoded = { raw, as_uint: asUint, as_addr: asAddr }
+      } else {
+        decoded = { raw: raw.slice(0, 130) + (raw.length > 130 ? '...' : '') }
       }
-      results.floppy_conversions = conversions
-    } else {
-      results.floppy_error = await res.text()
     }
-  } catch (e: any) {
-    results.floppy_exception = e?.message ?? String(e)
+    parsed[probes[i].name] = decoded ?? (res?.error ? `error: ${res.error.message}` : 'no_data')
   }
 
-  // ── 2. Merkl Curvance API ─────────────────────────────────────────────────
+  // Also get current block for reference
+  let blockNumber = 'unknown'
   try {
-    const res = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?items=100&tokenTypes=TOKEN&mainProtocolId=curvance&action=LEND&chainId=143',
-      { signal: AbortSignal.timeout(8_000), cache: 'no-store' }
-    )
-    results.merkl_status = res.status
-    if (res.ok) {
-      const data: any[] = await res.json()
-      const live = data.filter((o: any) => o.status === 'LIVE' && Number(o.apr) > 0)
-      results.merkl_live_count = live.length
-      results.merkl_live = live.map((o: any) => ({
-        name: o.name,
-        apr: o.apr,
-        status: o.status,
-        tokens: (o.tokens ?? []).map((t: any) => ({ symbol: t.symbol, verified: t.verified })),
-      }))
-    }
-  } catch (e: any) {
-    results.merkl_exception = e?.message ?? String(e)
-  }
+    const blockRes = await rpcBatch([{ jsonrpc: '2.0', id: 99, method: 'eth_blockNumber', params: [] }])
+    blockNumber = String(parseInt(blockRes[0]?.result ?? '0x0', 16))
+  } catch {}
 
-  return NextResponse.json(results, {
+  return NextResponse.json({ contract: SMON, block: blockNumber, probes: parsed }, {
     headers: { 'Cache-Control': 'no-store' },
   })
 }
