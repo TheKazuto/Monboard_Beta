@@ -464,14 +464,20 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
 
 // ─── MIDAS — tokenized RWAs via live API ──────────────────────────────────────
 // Source: https://api-prod.midas.app/api/marketplace/products
-// apy.value7d is a decimal (e.g. 0.1386 = 13.86% APY) — convert to APR with daily compounding
-// Filter: tvl.usd >= 100_000 and at least one non-zero APY value
-// No network filter — RWA products are multi-chain, accessible regardless of deployment chain
+// Requires browser-like headers — endpoint checks User-Agent server-side.
+// apy.value7d is a decimal (0.1386 = 13.86% APY) — convert to APR with daily compounding.
+// Filter: tvl.usd >= 100_000 and at least one non-zero APY value.
 async function fetchMidas(): Promise<AprEntry[]> {
   try {
     const res = await fetch('https://api-prod.midas.app/api/marketplace/products', {
       signal: AbortSignal.timeout(10_000),
       cache: 'no-store',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Origin': 'https://app.midas.app',
+        'Referer': 'https://app.midas.app/',
+      },
     })
     if (!res.ok) return []
     const data = await res.json()
@@ -480,15 +486,14 @@ async function fetchMidas(): Promise<AprEntry[]> {
 
     const out: AprEntry[] = []
     for (const p of products) {
-      const tvlUsd  = Number(p.tvl?.usd ?? 0)
-      const apy7d   = Number(p.apy?.value7d  ?? 0)
-      const apy30d  = Number(p.apy?.value30d ?? 0)
-      const apy     = apy7d > 0 ? apy7d : apy30d   // prefer 7d, fall back to 30d
+      const tvlUsd = Number(p.tvl?.usd ?? 0)
+      const apy7d  = Number(p.apy?.value7d  ?? 0)
+      const apy30d = Number(p.apy?.value30d ?? 0)
+      const apy    = apy7d > 0 ? apy7d : apy30d   // prefer 7d, fall back to 30d
 
-      if (tvlUsd < 100_000) continue   // skip illiquid / undeployed products
-      if (apy <= 0) continue           // skip zero-yield
+      if (tvlUsd < 100_000) continue
+      if (apy <= 0) continue
 
-      // APY decimal → APR % (daily compounding)
       const apr = Math.min(apyToApr(apy) * 100, 200)
       if (apr < 0.01) continue
 
@@ -498,7 +503,7 @@ async function fetchMidas(): Promise<AprEntry[]> {
       out.push({
         protocol: 'Midas',
         logo: '🏛️',
-        url: `https://app.midas.app`,
+        url: 'https://app.midas.app',
         tokens: [symbol],
         label: name,
         apr,
