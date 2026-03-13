@@ -434,50 +434,76 @@ async function fetchLagoon(): Promise<AprEntry[]> {
 }
 
 // ─── KURU — vault pool APRs ───────────────────────────────────────────────────
-// Source: https://api.kuru.io/api/v3/vaults
-// Returns { data: { data: [{ vaultAddress, apy, tvl, quoteToken, baseToken }] } }
-// apy arrives as a STRING decimal (e.g. "0.74" = 74% APY) — use parseFloat explicitly.
-// tvl is also a string (e.g. "920599.01") — parse with Number().
-// APY → APR via daily compounding: apyToApr(apyDecimal) * 100
-// Debug confirmed: MON/AUSD ~55.6% APR, MON/USDC ~37.1% APR
+// Source: https://api.kuru.io/api/v3/vaults  (lista) +
+//         https://api.kuru.io/api/v3/vaults/{addr}/performance  (PnL horário)
+// O campo `apy` da API é ENGANOSO para vaults boosted (isBoosted:true) — chega
+// inflado ~4x. Em vez disso, calculamos APR real a partir dos snapshots de PnL:
+//   APR = totalPnl_latest / avg(tvl) / days_since_inception * 365 * 100
+// Isso usa dados reais de lucro da vault, independente de boost.
+// Preferência de janela: inception (estável, ~30d de histórico disponível).
+
+const KURU_HEADERS = {
+  'Accept': 'application/json',
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Origin': 'https://www.kuru.io',
+  'Referer': 'https://www.kuru.io/',
+}
+
+async function fetchKuruVaultApr(vaultAddress: string): Promise<number> {
+  try {
+    const res = await fetch(
+      `https://api.kuru.io/api/v3/vaults/${vaultAddress}/performance`,
+      { signal: AbortSignal.timeout(8_000), cache: 'no-store', headers: KURU_HEADERS }
+    )
+    if (!res.ok) return 0
+    const data = await res.json()
+    const snaps: any[] = data?.data ?? []
+    if (snaps.length < 2) return 0
+
+    const first = snaps[0]
+    const last  = snaps[snaps.length - 1]
+    const msPerDay = 86_400_000
+    const days = (new Date(last.snapshotTimestamp).getTime() - new Date(first.snapshotTimestamp).getTime()) / msPerDay
+    if (days < 0.5) return 0
+
+    const pnlLatest = parseFloat(String(last.totalPnl ?? '0'))
+    const tvlAvg    = snaps.reduce((s, v) => s + parseFloat(String(v.tvl ?? '0')), 0) / snaps.length
+    if (tvlAvg <= 0 || pnlLatest <= 0) return 0
+
+    return Math.min(pnlLatest / tvlAvg / days * 365 * 100, 500)
+  } catch { return 0 }
+}
+
 async function fetchKuru(): Promise<AprEntry[]> {
   try {
     const res = await fetch(
       'https://api.kuru.io/api/v3/vaults',
-      {
-        signal: AbortSignal.timeout(8_000),
-        cache: 'no-store',
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-          'Origin': 'https://www.kuru.io',
-          'Referer': 'https://www.kuru.io/',
-        },
-      }
+      { signal: AbortSignal.timeout(8_000), cache: 'no-store', headers: KURU_HEADERS }
     )
     if (!res.ok) return []
     const raw = await res.json()
     const vaults: any[] = raw?.data?.data ?? []
+    if (!vaults.length) return []
+
+    // Busca APR real de todos os vaults em paralelo via /performance
+    const aprs = await Promise.all(vaults.map(v => fetchKuruVaultApr(v.vaultAddress ?? '')))
+
     const entries: AprEntry[] = []
+    for (let i = 0; i < vaults.length; i++) {
+      const vault = vaults[i]
+      const apr   = aprs[i]
+      if (apr < 0.01) continue
 
-    for (const vault of vaults) {
-      // apy comes as a string from the API — parse explicitly with parseFloat
-      const apyDecimal = parseFloat(String(vault.apy ?? '0'))
-      if (!isFinite(apyDecimal) || apyDecimal <= 0) continue
-
-      const apr = apyToApr(apyDecimal) * 100   // APY decimal → APR %
-      const tvl = Number(vault.tvl ?? 0)
-
+      const tvl         = Number(vault.tvl ?? 0)
       const baseSymbol  = String(vault.baseToken?.ticker  ?? vault.baseToken?.name  ?? 'MON')
       const quoteSymbol = String(vault.quoteToken?.ticker ?? vault.quoteToken?.name ?? '')
       const tokens      = [baseSymbol, quoteSymbol].filter(Boolean)
       const pairLabel   = tokens.join(' / ')
-      const vaultUrl    = `https://www.kuru.io/vaults/${vault.vaultAddress ?? ''}`
 
       entries.push({
         protocol: 'Kuru',
         logo: '🌀',
-        url: vaultUrl,
+        url: `https://www.kuru.io/vaults/${vault.vaultAddress ?? ''}`,
         tokens,
         label: `Kuru ${pairLabel}`,
         apr,
