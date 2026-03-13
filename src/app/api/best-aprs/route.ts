@@ -685,7 +685,14 @@ async function fetchMagmaOnchain(): Promise<any> {
 async function fetchFloppyNativeApy(): Promise<Map<string, number>> {
   try {
     const res = await fetch('https://api.floppy-backup.com/v1/monad/native_apy', {
-      signal: AbortSignal.timeout(5_000), cache: 'no-store',
+      signal: AbortSignal.timeout(5_000),
+      cache: 'no-store',
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Origin': 'https://app.floppy.fi',
+        'Referer': 'https://app.floppy.fi/',
+      },
     })
     if (!res.ok) return new Map()
     const data = await res.json()
@@ -1133,7 +1140,7 @@ async function fetchAllData() {
   const stableAPRs = all.filter(e => e.isStable).sort(byApr).slice(0, 5)
   const pools  = all.filter(e => e.type === 'pool').sort(byApr).slice(0, 10)
   const vaults = all.filter(e => e.type === 'vault').sort(byApr).slice(0, 10)
-  const lends  = all.filter(e => e.type === 'lend').sort(byApr).slice(0, 20)
+  const lends  = all.filter(e => e.type === 'lend').sort(byApr).slice(0, 10)
 
   return {
     stableAPRs,
