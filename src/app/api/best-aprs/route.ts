@@ -460,7 +460,7 @@ async function fetchKuru(): Promise<AprEntry[]> {
 
       entries.push({
         protocol: 'Kuru',
-        logo: '🔄',
+        logo: '🌀',
         url: vaultUrl,
         tokens,
         label: `Kuru ${pairLabel}`,
@@ -518,7 +518,7 @@ async function fetchKuruPools(): Promise<AprEntry[]> {
 
       entries.push({
         protocol: 'Kuru',
-        logo: '🔄',
+        logo: '🌀',
         url: vaultUrl,
         tokens,
         label: `Kuru ${pairLabel}`,
@@ -624,7 +624,7 @@ async function fetchKintsuVault(): Promise<AprEntry[]> {
 function buildKintsuEntry(apr: number): AprEntry {
   return {
     protocol: 'Kintsu',
-    logo: '🔷',
+    logo: '🔵',
     url: 'https://kintsu.xyz/vaults',
     tokens: ['WMON'],
     label: 'superMON Vault',
@@ -1095,7 +1095,7 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
 
       entries.push({
         protocol: 'Curvance',
-        logo: '🔵',
+        logo: '💎',
         url: opp.depositUrl ?? 'https://app.curvance.com',
         tokens: [tokenSymbol],
         label,
@@ -1114,7 +1114,7 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
       const nativeApr = apyToApr(nativeApy / 100) * 100
       entries.push({
         protocol: 'Curvance',
-        logo: '🔵',
+        logo: '💎',
         url: 'https://app.curvance.com',
         tokens: [market.symbol],
         label: market.label,
