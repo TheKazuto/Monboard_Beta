@@ -413,11 +413,53 @@ async function fetchLagoon(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── KURU — pool APRs ─────────────────────────────────────────────────────────
+// ─── KURU — vault pool APRs via Merkl ────────────────────────────────────────
+// Source: https://api.merkl.xyz/v4/opportunities?mainProtocolId=kuru&chainId=143
+// APR field is already in percentage. Tokens are the two assets in the LP vault.
+// depositUrl points directly to https://www.kuru.io/vaults/<address>
 async function fetchKuru(): Promise<AprEntry[]> {
-  // Endpoint /v1/pools?chain=monad returns 404 — disabled until correct endpoint is found
-  // TODO: re-enable when Kuru publishes correct API docs for Monad
-  return []
+  try {
+    const res = await fetch(
+      'https://api.merkl.xyz/v4/opportunities?mainProtocolId=kuru&chainId=143',
+      {
+        signal: AbortSignal.timeout(8_000),
+        cache: 'no-store',
+        headers: { 'Accept': 'application/json' },
+      }
+    )
+    if (!res.ok) return []
+    const raw = await res.json()
+    const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
+    const entries: AprEntry[] = []
+
+    for (const opp of data) {
+      if (opp.status !== 'LIVE') continue
+      const apr = Number(opp.apr ?? 0)
+      if (apr <= 0) continue
+
+      const tokens: string[] = (opp.tokens ?? [])
+        .map((t: any) => String(t.symbol ?? ''))
+        .filter(Boolean)
+
+      // "Provide liquidity to Kuru MON-AUSD vault" -> "MON / AUSD"
+      const nameMatch = (opp.name as string)?.match(/Kuru (.+?) vault/)
+      const pairLabel = nameMatch
+        ? nameMatch[1].replace('-', ' / ')
+        : tokens.join(' / ')
+
+      entries.push({
+        protocol: 'Kuru',
+        logo: '🔄',
+        url: opp.depositUrl ?? 'https://www.kuru.io/vaults',
+        tokens,
+        label: `Kuru ${pairLabel}`,
+        apr,
+        type: 'pool',
+        isStable: allStable(tokens),
+      })
+    }
+    return entries
+  } catch { return [] }
 }
 
 // ─── CURVANCE — lending markets via Merkl API + Floppy native APY ────────────
