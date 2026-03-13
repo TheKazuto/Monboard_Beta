@@ -1,56 +1,105 @@
 import { NextResponse } from 'next/server'
 
-export const dynamic = 'force-dynamic'
+export const revalidate = 0
 
-async function testEndpoint(label: string, url: string, headers: Record<string, string> = {}) {
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(10_000),
-      cache: 'no-store',
-      headers: { 'Accept': 'application/json', ...headers },
-    })
-    const text = await res.text()
-    let parsed: any = null
-    try { parsed = JSON.parse(text) } catch {}
-
-    return {
-      label,
-      status: res.status,
-      ok: res.ok,
-      bodySnippet: text.slice(0, 600),
-      vaultCount: parsed?.data?.data?.length ?? null,
-      vaults: parsed?.data?.data?.map((v: any) => ({
-        vaultAddress: v.vaultAddress,
-        apy: v.apy,
-        tvl: v.tvl,
-        baseToken: v.baseToken?.ticker ?? v.baseToken?.name,
-        quoteToken: v.quoteToken?.ticker ?? v.quoteToken?.name,
-        aprPct: v.apy
-          ? `${((Math.pow(1 + Number(v.apy), 1 / 365) - 1) * 365 * 100).toFixed(2)}%`
-          : null,
-      })) ?? null,
-    }
-  } catch (e: any) {
-    return { label, error: e?.message ?? String(e) }
-  }
-}
-
-const BROWSER_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Origin': 'https://www.kuru.io',
-  'Referer': 'https://www.kuru.io/',
+function apyToApr(apy: number): number {
+  if (apy <= 0) return 0
+  return 365 * (Math.pow(1 + apy, 1 / 365) - 1)
 }
 
 export async function GET() {
-  const results = await Promise.allSettled([
-    testEndpoint('v3/vaults — sem headers', 'https://api.kuru.io/api/v3/vaults'),
-    testEndpoint('v3/vaults — browser headers', 'https://api.kuru.io/api/v3/vaults', BROWSER_HEADERS),
-    testEndpoint('v2/vaults — browser headers', 'https://api.kuru.io/api/v2/vaults', BROWSER_HEADERS),
-    testEndpoint('merkl — kuru chainId=143', 'https://api.merkl.xyz/v4/opportunities?mainProtocolId=kuru&chainId=143'),
-  ])
+  const result: any = {}
 
-  return NextResponse.json({
-    ts: new Date().toISOString(),
-    results: results.map(r => r.status === 'fulfilled' ? r.value : { error: (r as any).reason?.message }),
+  // ── Step 1: raw fetch ────────────────────────────────────────────────────
+  let rawBody: any = null
+  let fetchStatus = 0
+  let fetchOk = false
+  let fetchError: string | null = null
+
+  try {
+    const res = await fetch('https://api.kuru.io/api/v3/vaults', {
+      signal: AbortSignal.timeout(8_000),
+      cache: 'no-store',
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Origin': 'https://www.kuru.io',
+        'Referer': 'https://www.kuru.io/',
+      },
+    })
+    fetchStatus = res.status
+    fetchOk = res.ok
+    try {
+      rawBody = await res.json()
+    } catch (e: any) {
+      fetchError = 'JSON parse failed: ' + e.message
+    }
+  } catch (e: any) {
+    fetchError = 'fetch threw: ' + e.message
+  }
+
+  result.step1_fetch = {
+    status: fetchStatus,
+    ok: fetchOk,
+    error: fetchError,
+    topLevelKeys: rawBody ? Object.keys(rawBody) : null,
+    successField: rawBody?.success,
+    dataKeys: rawBody?.data ? Object.keys(rawBody.data) : null,
+  }
+
+  // ── Step 2: extract vaults array ─────────────────────────────────────────
+  const vaults: any[] = rawBody?.data?.data ?? []
+  result.step2_vaults = {
+    path: 'raw.data.data',
+    count: vaults.length,
+    firstVaultKeys: vaults[0] ? Object.keys(vaults[0]) : null,
+  }
+
+  // ── Step 3: parse each vault ─────────────────────────────────────────────
+  result.step3_parsed = vaults.map((vault: any, i: number) => {
+    const apyRaw = vault.apy
+    const apyDecimal = parseFloat(String(apyRaw ?? '0'))
+    const apyValid = isFinite(apyDecimal) && apyDecimal > 0
+    const apr = apyValid ? apyToApr(apyDecimal) * 100 : 0
+
+    const baseSymbol  = String(vault.baseToken?.ticker  ?? vault.baseToken?.name  ?? 'MON')
+    const quoteSymbol = String(vault.quoteToken?.ticker ?? vault.quoteToken?.name ?? '')
+    const tvl = Number(vault.tvl ?? 0)
+
+    return {
+      index: i,
+      vaultAddress: vault.vaultAddress,
+      apyRaw,
+      apyRawType: typeof apyRaw,
+      apyDecimal,
+      apyValid,
+      aprPct: apr > 0 ? `${apr.toFixed(2)}%` : 'ZERO/INVALID',
+      tvl,
+      baseSymbol,
+      quoteSymbol,
+      wouldBeIncluded: apyValid && apr > 0,
+    }
   })
+
+  // ── Step 4: simulate the filter chain in fetchAllData ────────────────────
+  // Simulates: all.filter(e => e.apr > 0) → filter pools → sort → slice(0,10)
+  const fakeEntries = result.step3_parsed
+    .filter((v: any) => v.wouldBeIncluded)
+    .map((v: any) => ({
+      protocol: 'Kuru',
+      apr: parseFloat(v.aprPct),
+      label: `Kuru ${v.baseSymbol} / ${v.quoteSymbol}`,
+      type: 'pool',
+      isStable: false,
+    }))
+
+  result.step4_would_appear = {
+    entriesProduced: fakeEntries.length,
+    entries: fakeEntries,
+    note: fakeEntries.length === 0
+      ? 'fetchKuru returns [] — nothing to show'
+      : 'fetchKuru produces entries — if not showing, issue is in sort/slice or cache',
+  }
+
+  return NextResponse.json(result, { headers: { 'Cache-Control': 'no-store' } })
 }
