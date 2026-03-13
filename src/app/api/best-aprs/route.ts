@@ -474,6 +474,64 @@ async function fetchKuru(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
+
+// ─── KURU — AMM pool APRs via /api/v2/vaults ─────────────────────────────────
+// Source: https://api.kuru.io/api/v2/vaults
+// Returns 5 AMM market-making pools with fees24h, tvl24h, volume24h (float, USD)
+// APR formula (from kuru.io bundle): 365 * fees24h / tvl24h * 100
+// Distinct from /api/v3/vaults which returns managed LP vaults (type: vault)
+async function fetchKuruPools(): Promise<AprEntry[]> {
+  try {
+    const res = await fetch(
+      'https://api.kuru.io/api/v2/vaults',
+      {
+        signal: AbortSignal.timeout(8_000),
+        cache: 'no-store',
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Origin': 'https://www.kuru.io',
+          'Referer': 'https://www.kuru.io/',
+        },
+      }
+    )
+    if (!res.ok) return []
+    const raw = await res.json()
+    const vaults: any[] = raw?.data?.data ?? []
+    const entries: AprEntry[] = []
+
+    for (const vault of vaults) {
+      const fees24h = parseFloat(String(vault.fees24h ?? '0'))
+      const tvl24h  = parseFloat(String(vault.tvl24h  ?? '0'))
+      if (!isFinite(fees24h) || !isFinite(tvl24h) || tvl24h <= 0 || fees24h <= 0) continue
+
+      // Formula from kuru.io frontend bundle: apr = 365 * fees24h / tvl24h * 100
+      const apr = Math.min(365 * fees24h / tvl24h * 100, 500)
+      if (apr < 0.01) continue
+
+      const baseSymbol  = String(vault.basetoken?.ticker  ?? vault.basetoken?.name  ?? 'MON')
+      const quoteSymbol = String(vault.quotetoken?.ticker ?? vault.quotetoken?.name ?? '')
+      const tokens      = [baseSymbol, quoteSymbol].filter(Boolean)
+      const pairLabel   = tokens.join(' / ')
+      const vaultAddr   = vault.vaultaddress ?? ''
+      const vaultUrl    = `https://www.kuru.io/markets/${vault.marketaddress ?? ''}`
+
+      entries.push({
+        protocol: 'Kuru',
+        logo: '🔄',
+        url: vaultUrl,
+        tokens,
+        label: `Kuru ${pairLabel}`,
+        apr,
+        tvl: tvl24h,
+        type: 'pool',
+        isStable: allStable(tokens),
+      })
+    }
+    return entries
+  } catch { return [] }
+}
+
 // ─── MERKL — fetch reward APRs for Monad pools ──────────────────────────────
 async function fetchMerklRewardMap(): Promise<Map<string, number>> {
   const map = new Map<string, number>()
@@ -1132,7 +1190,7 @@ async function fetchAllData() {
   // Fetch native APY map first (fast, ~100ms) — shared by LST vaults + Curvance
   const nativeApyMap = await fetchFloppyNativeApy()
 
-  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, lstR, uniR, pancakeR, kintsuVaultR, upshiftR, gearboxR, curvanceR, midasR] =
+  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, kuruPoolsR, lstR, uniR, pancakeR, kintsuVaultR, upshiftR, gearboxR, curvanceR, midasR] =
     await Promise.allSettled([
       fetchMorpho(),
       fetchNeverland(),
@@ -1140,6 +1198,7 @@ async function fetchAllData() {
       fetchCurve(),
       fetchLagoon(),
       fetchKuru(),
+      fetchKuruPools(),
       fetchLSTVaults(nativeApyMap),
       fetchUniswap(),
       fetchPancakeswap(),
@@ -1161,6 +1220,7 @@ async function fetchAllData() {
     ...unwrap(curveR),
     ...unwrap(lagoonR),
     ...unwrap(kuruR),
+    ...unwrap(kuruPoolsR),
     ...unwrap(lstR),
     ...unwrap(uniR),
     ...unwrap(pancakeR),
