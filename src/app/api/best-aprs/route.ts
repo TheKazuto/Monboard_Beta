@@ -466,7 +466,7 @@ async function fetchKuru(): Promise<AprEntry[]> {
         label: `Kuru ${pairLabel}`,
         apr,
         tvl,
-        type: 'pool',
+        type: 'vault',
         isStable: allStable(tokens),
       })
     }
