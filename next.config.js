@@ -1,23 +1,16 @@
 /** @type {import('next').NextConfig} */
 
-// ─── Strict Content-Security-Policy ──────────────────────────────────────────
 const CSP = [
   "default-src 'self'",
 
-  // Scripts: self + unsafe-inline (Next.js 14 SSR) + AdsTerra CDN domains.
-  // Wildcards needed: AdsTerra script loads sub-scripts from other subdomains.
   "script-src 'self' 'unsafe-inline' https://*.effectivegatecpm.com https://*.highperformanceformat.com https://*.adsterra.com",
 
-  // Styles
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
 
-  // Fonts
   "font-src 'self' https://fonts.gstatic.com data:",
 
-  // Images: allow all HTTPS — NFT images come from unpredictable hosts
   "img-src 'self' data: blob: https:",
 
-  // Connections
   [
     "connect-src 'self'",
     "https://rpc.monad.xyz",
@@ -32,11 +25,9 @@ const CSP = [
     "https://api.alternative.me",
     "https://api.lagoon.finance",
     "https://app.renzoprotocol.com",
-    // AdsTerra CDN + tracking
     "https://*.effectivegatecpm.com",
     "https://*.highperformanceformat.com",
     "https://*.adsterra.com",
-    // WalletConnect
     "wss://relay.walletconnect.com",
     "wss://relay.walletconnect.org",
     "https://relay.walletconnect.com",
@@ -45,7 +36,6 @@ const CSP = [
     "https://api.web3modal.org",
     "https://pulse.walletconnect.org",
     "https://rainbowkit.com",
-    // Public RPC nodes
     "https://ethereum-rpc.publicnode.com",
     "https://bsc-rpc.publicnode.com",
     "https://polygon-rpc.com",
@@ -55,23 +45,17 @@ const CSP = [
     "https://api.avax.network",
   ].join(' '),
 
-  // Frames: AdsTerra iframes spawned by the ad script inside our srcdoc iframe.
-  // 'self' needed because our iframe srcdoc is same-origin.
-  "frame-src 'self' https://*.effectivegatecpm.com https://*.highperformanceformat.com https://*.adsterra.com",
+  "frame-src https://*.effectivegatecpm.com https://*.highperformanceformat.com https://*.adsterra.com",
 
-  // Workers
   "worker-src 'self' blob:",
 
-  // Block plugins
   "object-src 'none'",
 
-  // Force HTTPS
   "upgrade-insecure-requests",
 ].join('; ')
 
 const nextConfig = {
   images: {
-    // Cloudflare Pages does not support Next.js Image Optimization API.
     unoptimized: true,
     remotePatterns: [
       { protocol: 'https', hostname: 'assets.coingecko.com' },
