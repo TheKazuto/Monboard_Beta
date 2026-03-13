@@ -855,6 +855,37 @@ async function fetchMagmaOnchain(): Promise<{ apr: number; tvlInMON: number } | 
   } catch { return null }
 }
 
+// ─── MON price — DeFiLlama coins API ─────────────────────────────────────────
+async function fetchMonPrice(): Promise<number> {
+  try {
+    const res = await fetch(
+      'https://coins.llama.fi/prices/current/monad:0x0000000000000000000000000000000000000000',
+      { signal: AbortSignal.timeout(5_000), cache: 'no-store' }
+    )
+    if (!res.ok) return 0
+    const data = await res.json()
+    return Number(data?.coins?.['monad:0x0000000000000000000000000000000000000000']?.price ?? 0)
+  } catch { return 0 }
+}
+
+// ─── DeFiLlama protocol TVLs — batch for protocols without per-asset TVL API ─
+// Slugs: shmonad, kintsu, magma-staking, curvance
+async function fetchDeFiLlamaTvls(): Promise<Map<string, number>> {
+  const slugs = ['shmonad', 'kintsu', 'magma-staking', 'curvance'] as const
+  const results = await Promise.allSettled(
+    slugs.map(slug =>
+      fetch(`https://api.llama.fi/tvl/${slug}`, { signal: AbortSignal.timeout(5_000), cache: 'no-store' })
+        .then(r => r.text())
+    )
+  )
+  const map = new Map<string, number>()
+  slugs.forEach((slug, i) => {
+    const r = results[i]
+    if (r.status === 'fulfilled') map.set(slug, Number(r.value) || 0)
+  })
+  return map
+}
+
 // ─── FLOPPY BACKUP — native APY for Monad LST/vault tokens ─────────────────────
 // Source: https://api.floppy-backup.com/v1/monad/native_apy
 // Returns APY (not APR) for: SHMON, SMON, GMON, USDC, SYZUSD, LOAZND, MUBOND
