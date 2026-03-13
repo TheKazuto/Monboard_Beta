@@ -300,24 +300,32 @@ function parseCurve(merklData: any[]): AprEntry[] {
   return entries
 }
 
-// ─── UPSHIFT — vaults via /api/proxy/vaults ──────────────────────────────────
-// Source: https://app.upshift.finance/api/proxy/vaults
-// Filtros: chainId=143, status=active, isVisible=true, tvl>1000, apy.apy>0
-// APY field: apy.apy (já em %, ex: 14.0 = 14%) — target APY definido pela equipe
-// campaignApy: incentivos extras em %, somamos ao base para APR total
-// superMON (0x792C) ignorado em fetchUpshift — mesmo vault coberto pelo Kintsu
+// ─── UPSHIFT — vaults via api.upshift.finance/metrics/vaults_summary ─────────
+// Source: https://api.upshift.finance/metrics/vaults_summary (sem bot-protection)
+// APY fields em decimal: 7d_apy > 30d_apy > target_apy (ex: 0.119 = 11.9%)
+// TVL: total_assets * underlying_price (USD para stablecoins; DeFiLlama para LSTs)
+// superMON (0x792C) ignorado aqui — coberto por fetchKintsuVault
 // fetchUpshiftRaw() é chamado uma vez no fetchAllData e compartilhado com fetchKintsuVault
 
-const UPSHIFT_KNOWN_STABLECOINS = new Set(['AUSD', 'USDC', 'USDT', 'USDT0', 'DAI', 'FRAX'])
-const UPSHIFT_PROXY_URL = 'https://app.upshift.finance/api/proxy/vaults'
-const UPSHIFT_IGNORE    = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c']) // superMON = Kintsu
+const UPSHIFT_API_URL = 'https://api.upshift.finance/metrics/vaults_summary'
+const UPSHIFT_IGNORE  = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c']) // superMON = Kintsu
+
+// Infere símbolo do underlying a partir do nome do vault
+function upshiftTokenFromName(name: string): string {
+  if (/AUSD/i.test(name))        return 'AUSD'
+  if (/USDC/i.test(name))        return 'USDC'
+  if (/USDT/i.test(name))        return 'USDT'
+  if (/BTC|wBTC/i.test(name))   return 'WBTC'
+  if (/MON/i.test(name))         return 'MON'
+  return '?'
+}
 
 async function fetchUpshiftRaw(): Promise<any[]> {
   try {
-    const res = await fetch(UPSHIFT_PROXY_URL, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
+    const res = await fetch(UPSHIFT_API_URL, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
     if (!res.ok) return []
     const data = await res.json()
-    return Array.isArray(data?.data) ? data.data : []
+    return Array.isArray(data) ? data : []
   } catch { return [] }
 }
 
@@ -326,37 +334,48 @@ function parseUpshift(vaults: any[]): AprEntry[] {
 
   const out: AprEntry[] = []
   for (const v of vaults) {
-      if (v.chainId !== 143) continue
-      if (v.status !== 'active') continue
-      if (!v.isVisible) continue
-      if ((v.latest_reported_tvl ?? 0) < 1_000) continue
-      if (UPSHIFT_IGNORE.has((v.address ?? '').toLowerCase())) continue
+    if (v.chain !== 143) continue
+    if (UPSHIFT_IGNORE.has((v.address ?? '').toLowerCase())) continue
 
-      const baseApy = Number(v.apy?.apy ?? 0)
-      if (baseApy <= 0) continue
+    // Filtra vaults de teste/dev pelo nome
+    const name: string = v.vault_name ?? ''
+    if (/test|bugbash/i.test(name)) continue
 
-      const campaignApy = Number(v.apy?.campaignApy ?? 0)
-      const totalApy    = baseApy + (campaignApy > 0 ? campaignApy : 0)
+    // TVL em USD
+    const tvl = Number(v.total_assets ?? 0) * Number(v.underlying_price ?? 0)
+    if (tvl < 1_000) continue
 
-      const apr = Math.min(apyToApr(totalApy / 100) * 100, 500)
-      if (apr < 0.01) continue
+    // APY decimal: 7d > 30d > target (ex: 0.119 = 11.9%)
+    const apy7d  = v['7d_apy']   != null ? Number(v['7d_apy'])   : null
+    const apy30d = v['30d_apy']  != null ? Number(v['30d_apy'])  : null
+    const target = v.target_apy  != null ? Number(v.target_apy) : null
 
-      const depositSymbols: string[] = (v.depositAssets ?? []).map((a: any) => a.symbol).filter(Boolean)
-      const tokens = depositSymbols.length > 0 ? depositSymbols : ['?']
-      const stable = tokens.every((t: string) => UPSHIFT_KNOWN_STABLECOINS.has(t))
+    const apyDecimal = (apy7d != null && apy7d > 0) ? apy7d
+      : (apy30d != null && apy30d > 0) ? apy30d
+      : (target != null && target > 0) ? target
+      : null
 
-      out.push({
-        protocol: 'Upshift',
-        logo:     '🔺',
-        url:      `https://app.upshift.finance/vaults/${v.address ?? ''}`,
-        tokens,
-        label:    v.name ?? tokens.join(' / '),
-        apr,
-        tvl:      Number(v.latest_reported_tvl ?? 0),
-        type:     'vault',
-        isStable: stable,
-      })
-    }
+    if (!apyDecimal || apyDecimal <= 0) continue
+
+    // apyToApr espera fração pura (ex: 0.119), retorna fração → ×100 para %
+    const apr = Math.min(apyToApr(apyDecimal) * 100, 500)
+    if (apr < 0.01) continue
+
+    const token  = upshiftTokenFromName(name)
+    const stable = STABLECOINS.has(token)
+
+    out.push({
+      protocol: 'Upshift',
+      logo:     '🔺',
+      url:      `https://app.upshift.finance/vaults/${v.address ?? ''}`,
+      tokens:   [token],
+      label:    name,
+      apr,
+      tvl,
+      type:     'vault',
+      isStable: stable,
+    })
+  }
   return out
 }
 
@@ -565,9 +584,9 @@ async function fetchPancakeswap(merklData: any[]): Promise<AprEntry[]> {
 }
 
 // ─── KINTSU — superMON vault ─────────────────────────────────────────────────
-// superMON (0x792C) é gerido pela Kintsu mas listado na Upshift proxy API.
-// historical_apy.7 = APY decimal (ex: 0.1077 = 10.77%). Usar 7d.
-// Nota: Upshift pode retornar 429 — nesse caso retorna [].
+// superMON (0x792C) listado na api.upshift.finance/metrics/vaults_summary.
+// APY fields: 7d_apy > 30d_apy (decimal, ex: 0.119 = 11.9%).
+// TVL via DeFiLlama (kintsuTvl) — underlying_price impreciso para MON.
 
 const KINTSU_VAULT_ADDRESS = '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'
 
@@ -577,11 +596,15 @@ function fetchKintsuVault(upshiftVaults: any[], kintsuTvl = 0): AprEntry[] {
   )
   if (!vault) return []
 
-  const hist = vault.historical_apy ?? {}
-  const apyDecimal = hist['7'] ?? hist['30'] ?? null
-  if (typeof apyDecimal !== 'number' || apyDecimal <= 0) return []
+  const apy7d  = vault['7d_apy']  != null ? Number(vault['7d_apy'])  : null
+  const apy30d = vault['30d_apy'] != null ? Number(vault['30d_apy']) : null
+  const apyDecimal = (apy7d != null && apy7d > 0) ? apy7d
+    : (apy30d != null && apy30d > 0) ? apy30d
+    : null
 
-  const apr = Math.min(365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100, 200)
+  if (!apyDecimal || apyDecimal <= 0) return []
+
+  const apr = Math.min(apyToApr(apyDecimal) * 100, 200)
   return [buildKintsuEntry(apr, kintsuTvl)]
 }
 
