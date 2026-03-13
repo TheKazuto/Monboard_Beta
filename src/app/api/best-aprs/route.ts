@@ -251,79 +251,53 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── CURVE — pool APRs via Merkl API ─────────────────────────────────────────
-// Source: https://api.merkl.xyz/v4/opportunities?mainProtocolId=curve&chainId=143...
+// ─── CURVE — pool APRs via Merkl (dados compartilhados via merklData) ────────
 // APR field is already a percentage (e.g. 4.57 = 4.57% APR) — no conversion needed.
-// Gauge entries duplicate the underlying pool APR → deduplicate by depositUrl prefix.
+// Gauge entries duplicate the underlying pool APR → deduplicate by identifier.
 // Tokens: filter out gauge LP tokens (symbols ending in '-gauge').
-async function fetchCurve(): Promise<AprEntry[]> {
-  const MERKL_CURVE = 'https://api.merkl.xyz/v4/opportunities'
-  const params = new URLSearchParams({
-    mainProtocolId: 'curve',
-    chainId: '143',
-    test: 'false',
-    status: 'LIVE',
-    action: 'POOL',
-    items: '100',
-    page: '0',
-  })
+function parseCurve(merklData: any[]): AprEntry[] {
+  // Filter Curve pools and deduplicate by address (keep highest APR per address)
+  const byAddress = new Map<string, any>()
+  for (const item of merklData) {
+    if ((item.mainProtocol ?? item.protocol) !== 'curve') continue
+    if (item.action !== 'POOL') continue
+    const addr = (item.identifier ?? '').toLowerCase()
+    if (!addr) continue
+    const existing = byAddress.get(addr)
+    if (!existing || Number(item.apr ?? 0) > Number(existing.apr ?? 0)) {
+      byAddress.set(addr, item)
+    }
+  }
 
-  try {
-    const res = await fetch(`${MERKL_CURVE}?${params}`, {
-      signal: AbortSignal.timeout(10_000),
-      cache: 'no-store',
-      headers: { 'Accept': 'application/json' },
+  const entries: AprEntry[] = []
+  for (const item of byAddress.values()) {
+    const apr = Number(item.apr ?? 0)
+    if (apr < 0.001) continue
+    const tvl = Number(item.tvl ?? 0)
+    if (tvl < 1_000) continue
+
+    const url = item.depositUrl ?? `https://curve.finance/dex/monad/pools/${item.identifier}/deposit`
+
+    // Filter out gauge LP token symbols (end in '-gauge'), keep real asset symbols
+    const tokens: string[] = (item.tokens ?? [])
+      .filter((t: any) => t.type === 'TOKEN' && !String(t.symbol ?? '').endsWith('-gauge'))
+      .map((t: any) => String(t.symbol ?? ''))
+      .filter(Boolean)
+    if (tokens.length === 0) continue
+    // Skip gauge-only staking entries (single synthetic token, no real LP pair)
+    if (tokens.length === 1 && !url.includes('/deposit')) continue
+
+    entries.push({
+      protocol: 'Curve', logo: '🌊',
+      url,
+      tokens, label: tokens.join(' / '),
+      apr: Math.min(apr, 500),
+      tvl,
+      type: 'pool' as const,
+      isStable: allStable(tokens),
     })
-    if (!res.ok) return []
-    const raw = await res.json()
-    const items: any[] = Array.isArray(raw) ? raw : (raw.data ?? raw.opportunities ?? [])
-
-    // Deduplicate: gauge + pool entries often share the same pool address.
-    // Keep the one with higher APR per unique pool contract address.
-    const byAddress = new Map<string, any>()
-    for (const item of items) {
-      if (item.chainId !== 143) continue
-      const addr = (item.identifier ?? '').toLowerCase()
-      if (!addr) continue
-      const existing = byAddress.get(addr)
-      if (!existing || Number(item.apr ?? 0) > Number(existing.apr ?? 0)) {
-        byAddress.set(addr, item)
-      }
-    }
-
-    const entries: AprEntry[] = []
-    for (const item of byAddress.values()) {
-      const apr = Number(item.apr ?? 0)
-      if (apr < 0.001) continue
-      const tvl = Number(item.tvl ?? 0)
-      if (tvl < 1_000) continue
-
-      const url = item.depositUrl ?? `https://curve.finance/dex/monad/pools/${item.identifier}/deposit`
-
-      // Filter out gauge LP token symbols (end in '-gauge'), keep real asset symbols
-      const tokens: string[] = (item.tokens ?? [])
-        .filter((t: any) => t.type === 'TOKEN' && !String(t.symbol ?? '').endsWith('-gauge'))
-        .map((t: any) => String(t.symbol ?? ''))
-        .filter(Boolean)
-      if (tokens.length === 0) continue
-      // Skip gauge-only staking entries (single synthetic token, no real LP pair)
-      // These have generic pool URLs and duplicate the underlying LP pool entry
-      if (tokens.length === 1 && !url.includes('/deposit')) continue
-
-      const label = tokens.join(' / ')
-
-      entries.push({
-        protocol: 'Curve', logo: '🌊',
-        url,
-        tokens, label,
-        apr: Math.min(apr, 500),
-        tvl,
-        type: 'pool' as const,
-        isStable: allStable(tokens),
-      })
-    }
-    return entries
-  } catch { return [] }
+  }
+  return entries
 }
 
 // ─── UPSHIFT — vaults via /api/proxy/vaults ──────────────────────────────────
@@ -331,26 +305,27 @@ async function fetchCurve(): Promise<AprEntry[]> {
 // Filtros: chainId=143, status=active, isVisible=true, tvl>1000, apy.apy>0
 // APY field: apy.apy (já em %, ex: 14.0 = 14%) — target APY definido pela equipe
 // campaignApy: incentivos extras em %, somamos ao base para APR total
-// superMON (0x792C) ignorado — mesmo vault coberto pelo Kintsu
-// Sem fallback on-chain: vaults usam ABI customizada (August protocol), não ERC4626
+// superMON (0x792C) ignorado em fetchUpshift — mesmo vault coberto pelo Kintsu
+// fetchUpshiftRaw() é chamado uma vez no fetchAllData e compartilhado com fetchKintsuVault
 
 const UPSHIFT_KNOWN_STABLECOINS = new Set(['AUSD', 'USDC', 'USDT', 'USDT0', 'DAI', 'FRAX'])
 const UPSHIFT_PROXY_URL = 'https://app.upshift.finance/api/proxy/vaults'
 const UPSHIFT_IGNORE    = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c']) // superMON = Kintsu
 
-async function fetchUpshift(): Promise<AprEntry[]> {
+async function fetchUpshiftRaw(): Promise<any[]> {
   try {
-    const res = await fetch(UPSHIFT_PROXY_URL, {
-      signal: AbortSignal.timeout(10_000),
-      cache: 'no-store',
-    })
+    const res = await fetch(UPSHIFT_PROXY_URL, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
     if (!res.ok) return []
     const data = await res.json()
-    const vaults: any[] = data?.data ?? []
-    if (!Array.isArray(vaults) || vaults.length === 0) return []
+    return Array.isArray(data?.data) ? data.data : []
+  } catch { return [] }
+}
 
-    const out: AprEntry[] = []
-    for (const v of vaults) {
+function parseUpshift(vaults: any[]): AprEntry[] {
+  if (!Array.isArray(vaults) || vaults.length === 0) return []
+
+  const out: AprEntry[] = []
+  for (const v of vaults) {
       if (v.chainId !== 143) continue
       if (v.status !== 'active') continue
       if (!v.isVisible) continue
@@ -382,41 +357,27 @@ async function fetchUpshift(): Promise<AprEntry[]> {
         isStable: stable,
       })
     }
-    return out
-  } catch { return [] }
+  return out
 }
 
 // ─── LAGOON — vaults ──────────────────────────────────────────────────────────
-// API: GET /api/vaults?chainId=143&... → list vaults
-//      GET /api/vault-apr?chainId=143&address=X → APR per vault
+// includeApr=true retorna weeklyApr/monthlyApr/inceptionApr diretamente em vault.state,
+// eliminando as N chamadas individuais /api/vault-apr (N+1 → 1 request).
 // APR preference: weeklyApr → monthlyApr → inceptionApr (linearNetApr)
 async function fetchLagoon(): Promise<AprEntry[]> {
   try {
-    const listRes = await fetch(
-      'https://app.lagoon.finance/api/vaults?chainId=143&underlyingassetSymbol=0&curatorId=0&pageIndex=0&pageSize=50&includeApr=false',
+    const res = await fetch(
+      'https://app.lagoon.finance/api/vaults?chainId=143&underlyingassetSymbol=0&curatorId=0&pageIndex=0&pageSize=50&includeApr=true',
       { signal: AbortSignal.timeout(8_000), cache: 'no-store' }
     )
-    if (!listRes.ok) return []
-    const listData = await listRes.json()
-    const vaults: any[] = listData?.vaults ?? []
+    if (!res.ok) return []
+    const data = await res.json()
+    const vaults: any[] = data?.vaults ?? []
     if (!vaults.length) return []
 
-    const aprResults = await Promise.allSettled(
-      vaults.map(v =>
-        fetch(`https://app.lagoon.finance/api/vault-apr?chainId=143&address=${v.address}`, {
-          signal: AbortSignal.timeout(8_000), cache: 'no-store',
-        }).then(r => r.ok ? r.json() : null)
-      )
-    )
-
     const entries: AprEntry[] = []
-    for (let i = 0; i < vaults.length; i++) {
-      const vault = vaults[i]
-      const aprResult = aprResults[i]
-      const aprData = aprResult.status === 'fulfilled' ? (aprResult as PromiseFulfilledResult<any>).value : null
-      if (!aprData) continue
-
-      const s = aprData.state ?? {}
+    for (const vault of vaults) {
+      const s = vault.state ?? {}
       const apr =
         s.weeklyApr?.linearNetApr ??
         s.monthlyApr?.linearNetApr ??
@@ -434,7 +395,7 @@ async function fetchLagoon(): Promise<AprEntry[]> {
         tokens: [token],
         label: `${vault.name} (${curator})`,
         apr,
-        tvl: Number(vault.state?.totalAssetsUsd ?? vault.tvl ?? 0),
+        tvl: Number(s.totalAssetsUsd ?? 0),
         type: 'vault',
         isStable: ['USDC', 'USDT', 'AUSD', 'DAI', 'USDT0'].includes(token),
       })
@@ -539,7 +500,6 @@ async function fetchKuruPools(): Promise<AprEntry[]> {
       const quoteSymbol = String(vault.quotetoken?.ticker ?? vault.quotetoken?.name ?? '')
       const tokens      = [baseSymbol, quoteSymbol].filter(Boolean)
       const pairLabel   = tokens.join(' / ')
-      const vaultAddr   = vault.vaultaddress ?? ''
       const vaultUrl    = `https://www.kuru.io/markets/${vault.marketaddress ?? ''}`
 
       entries.push({
@@ -558,37 +518,23 @@ async function fetchKuruPools(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── MERKL — fetch reward APRs for Monad pools ──────────────────────────────
-async function fetchMerklRewardMap(): Promise<Map<string, number>> {
-  const map = new Map<string, number>()
-  try {
-    const res = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?chainId=143&action=POOL&status=LIVE&items=100',
-      { signal: AbortSignal.timeout(12_000), cache: 'no-store' },
-    )
-    if (!res.ok) return map
-    const opps: any[] = await res.json()
-    for (const o of opps) {
-      const addr = (o.identifier ?? '').toLowerCase()
-      const apr  = Number(o.apr ?? 0)
-      if (addr && apr > 0) {
-        map.set(addr, (map.get(addr) ?? 0) + apr)
-      }
-    }
-  } catch { /* ignore */ }
-  return map
-}
-
 // ─── PANCAKESWAP V3 — pools via explorer API + Merkl rewards ─────────────────
-async function fetchPancakeswap(): Promise<AprEntry[]> {
+// merklData é compartilhado via fetchMerklAll() no fetchAllData (sem fetch próprio aqui)
+async function fetchPancakeswap(merklData: any[]): Promise<AprEntry[]> {
+  // Gerar reward map dos dados Merkl já disponíveis (action=POOL)
+  const merklMap = new Map<string, number>()
+  for (const o of merklData) {
+    if (o.action !== 'POOL') continue
+    const addr = (o.identifier ?? '').toLowerCase()
+    const apr  = Number(o.apr ?? 0)
+    if (addr && apr > 0) merklMap.set(addr, (merklMap.get(addr) ?? 0) + apr)
+  }
+
   try {
-    const [poolsRes, merklMap] = await Promise.all([
-      fetch(
-        'https://explorer.pancakeswap.com/api/cached/pools/list?protocols=v3&chains=monad&orderBy=tvlUSD',
-        { signal: AbortSignal.timeout(15_000), cache: 'no-store' },
-      ),
-      fetchMerklRewardMap(),
-    ])
+    const poolsRes = await fetch(
+      'https://explorer.pancakeswap.com/api/cached/pools/list?protocols=v3&chains=monad&orderBy=tvlUSD',
+      { signal: AbortSignal.timeout(15_000), cache: 'no-store' },
+    )
     if (!poolsRes.ok) return []
     const data = await poolsRes.json()
     const rows: any[] = data?.rows ?? data?.data?.rows ?? (Array.isArray(data) ? data : [])
@@ -625,26 +571,18 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
 
 const KINTSU_VAULT_ADDRESS = '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'
 
-async function fetchKintsuVault(kintsuTvl = 0): Promise<AprEntry[]> {
-  try {
-    const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
-    })
-    if (!res.ok) return []
-    const data = await res.json()
-    const vaults: any[] = data?.data ?? []
-    const vault = vaults.find(
-      (v: any) => (v.address ?? '').toLowerCase() === KINTSU_VAULT_ADDRESS.toLowerCase()
-    )
-    if (!vault) return []
+function fetchKintsuVault(upshiftVaults: any[], kintsuTvl = 0): AprEntry[] {
+  const vault = upshiftVaults.find(
+    (v: any) => (v.address ?? '').toLowerCase() === KINTSU_VAULT_ADDRESS.toLowerCase()
+  )
+  if (!vault) return []
 
-    const hist = vault.historical_apy ?? {}
-    const apyDecimal = hist['7'] ?? hist['30'] ?? null
-    if (typeof apyDecimal !== 'number' || apyDecimal <= 0) return []
+  const hist = vault.historical_apy ?? {}
+  const apyDecimal = hist['7'] ?? hist['30'] ?? null
+  if (typeof apyDecimal !== 'number' || apyDecimal <= 0) return []
 
-    const apr = Math.min(365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100, 200)
-    return [buildKintsuEntry(apr, kintsuTvl)]
-  } catch { return [] }
+  const apr = Math.min(365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100, 200)
+  return [buildKintsuEntry(apr, kintsuTvl)]
 }
 
 function buildKintsuEntry(apr: number, tvl = 0): AprEntry {
@@ -738,7 +676,7 @@ async function fetchGearbox(): Promise<AprEntry[]> {
         tokens: [meta.token],
         label: pool.name ?? meta.token,
         apr,
-        tvl: Number(pool.expectedLiquidity?.__value ?? 0) / 1e18,
+        tvl: Number(pool.expectedLiquidity?.__value ?? 0) / Math.pow(10, pool.decimals ?? 18),
         type: 'lend',
         isStable: meta.isStable,
       })
@@ -782,43 +720,25 @@ function ppsGrowthToApr(ppsNow: bigint, ppsPast: bigint, days: number): number {
   return apr > 0 && apr < 500 ? apr : 0
 }
 
-// Try 7d window first, then 3d, then 1d — handles new vaults with limited history
+// Busca ppsNow + todas as janelas em paralelo — reduz RPCs sequenciais a 1 round-trip
 async function getVaultApr(vault: string, currentBlock: number): Promise<number> {
   const windows = [
     { days: 7, blocks: BLOCKS_PER_DAY * 7 },
     { days: 3, blocks: BLOCKS_PER_DAY * 3 },
     { days: 1, blocks: BLOCKS_PER_DAY * 1 },
   ]
-  const ppsNow = await getPricePerShare(vault, 'latest')
+  const pastBlocks = windows.map(w => '0x' + Math.max(1, currentBlock - w.blocks).toString(16))
+  const [ppsNow, ...ppsPasts] = await Promise.all([
+    getPricePerShare(vault, 'latest'),
+    ...pastBlocks.map(b => getPricePerShare(vault, b)),
+  ])
   if (ppsNow === 0n) return 0
 
-  for (const { days, blocks } of windows) {
-    const pastBlock = '0x' + Math.max(1, currentBlock - blocks).toString(16)
-    const ppsPast = await getPricePerShare(vault, pastBlock)
-    const apr = ppsGrowthToApr(ppsNow, ppsPast, days)
+  for (let i = 0; i < windows.length; i++) {
+    const apr = ppsGrowthToApr(ppsNow, ppsPasts[i], windows[i].days)
     if (apr > 0) return apr
   }
   return 0
-}
-
-interface VaultMeta { name: string; address: string; tokens: string[]; isStable: boolean }
-
-async function fetchERC4626Vaults<T extends VaultMeta>(
-  vaults: T[],
-  toEntry: (v: T, apr: number) => Omit<AprEntry, 'apr'>
-): Promise<AprEntry[]> {
-  try {
-    const currentBlock = await getBlockNumber()
-    const aprs = await Promise.all(vaults.map(v => getVaultApr(v.address, currentBlock)))
-
-    return vaults
-      .map((v, i) => {
-        const apr = aprs[i]
-        if (apr < 0.01) return null
-        return { ...toEntry(v, apr), apr } as AprEntry
-      })
-      .filter((e): e is AprEntry => e !== null)
-  } catch { return [] }
 }
 
 // ─── MAGMA — gMON APR via GraphQL ────────────────────────────────────────────
@@ -886,6 +806,22 @@ async function fetchDeFiLlamaTvls(): Promise<Map<string, number>> {
   return map
 }
 
+// ─── MERKL — busca unificada de todas as oportunidades Monad ─────────────────
+// Uma única chamada substitui as 3 anteriores (Curve, PancakeSwap rewards, Curvance).
+// Curve e PancakeSwap usam action=POOL; Curvance usa action=LEND.
+// Filtragem por mainProtocol/action é feita client-side em parseCurve/fetchPancakeswap/fetchCurvance.
+async function fetchMerklAll(): Promise<any[]> {
+  try {
+    const res = await fetch(
+      'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=300',
+      { signal: AbortSignal.timeout(12_000), cache: 'no-store', headers: { 'Accept': 'application/json' } }
+    )
+    if (!res.ok) return []
+    const raw = await res.json()
+    return Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
+  } catch { return [] }
+}
+
 // ─── FLOPPY BACKUP — native APY for Monad LST/vault tokens ─────────────────────
 // Source: https://api.floppy-backup.com/v1/monad/native_apy
 // Returns APY (not APR) for: SHMON, SMON, GMON, USDC, SYZUSD, LOAZND, MUBOND
@@ -915,58 +851,10 @@ async function fetchFloppyNativeApy(): Promise<Map<string, number>> {
   } catch { return new Map() }
 }
 
-// ─── KINTSU sMON — APR via Protocol_LST_Analytics_Day GraphQL ────────────────
-// Source: https://kintsu.xyz/api/graphql (no auth required)
-// APR = (totalRewards delta 7d / avg TVL 7d) / 7 * 365
-// totalRewards is cumulative MON, totalPooledStaked is current TVL in MON.
-// 7d window is more stable than 1d due to validator reward variance.
-
-const KINTSU_LST_GQL = 'https://kintsu.xyz/api/graphql'
-const KINTSU_LST_QUERY = `{
-  Protocol_LST_Analytics_Day(
-    where: { chainId: { _eq: 143 } }
-    order_by: { date: desc }
-    limit: 8
-  ) {
-    date
-    totalRewards
-    totalPooledStaked
-  }
-}`
-
+// ─── KINTSU sMON — APR via Floppy native APY ─────────────────────────────────
+// kintsu.xyz/api/graphql retorna 500 server-side — usa Floppy SMON APY diretamente.
+// SMON APY confirmado disponível em fetchFloppyNativeApy() (chave 'SMON').
 async function fetchKintsusMON(nativeApyMap: Map<string, number>, kintsuTvl = 0): Promise<AprEntry | null> {
-  // Primary: kintsu.xyz/api/graphql — returns 500 server-side, kept for future recovery.
-  // Fallback: Floppy SMON APY from nativeApyMap (confirmed working).
-  try {
-    const res = await fetch(KINTSU_LST_GQL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: KINTSU_LST_QUERY }),
-      signal: AbortSignal.timeout(8_000),
-      cache: 'no-store',
-    })
-    if (res.ok) {
-      const data = await res.json()
-      const rows: any[] = data?.data?.Protocol_LST_Analytics_Day ?? []
-      if (rows.length >= 2) {
-        const newest = rows[0]
-        const oldest = rows[Math.min(6, rows.length - 1)]
-        const rewardDelta = Number(newest.totalRewards) - Number(oldest.totalRewards)
-        const avgTvl = (Number(newest.totalPooledStaked) + Number(oldest.totalPooledStaked)) / 2
-        const days = rows.length - 1
-        if (avgTvl > 0 && rewardDelta > 0) {
-          const apr = Math.min((rewardDelta / avgTvl / days) * 365 * 100, 100)
-          if (apr > 0) return {
-            protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
-            tokens: ['sMON'], label: 'Staked MON',
-            apr, tvl: kintsuTvl, type: 'vault', isStable: false,
-          }
-        }
-      }
-    }
-  } catch { /* fall through to Floppy */ }
-
-  // Fallback: Floppy SMON APY
   const smonApy = nativeApyMap.get('SMON') ?? 0
   if (smonApy <= 0) return null
   const apr = Math.min(apyToApr(smonApy / 100) * 100, 100)
@@ -983,7 +871,7 @@ async function fetchKintsusMON(nativeApyMap: Map<string, number>, kintsuTvl = 0)
 // asset() = 0xeeee...ee (native MON). api.shmonad.xyz is offline (530).
 const SHMON_ADDRESS = '0x1B68626dCa36c7fE922fD2d55E4f631d962dE19c'
 
-async function fetchShMonad(_nativeApyMap: Map<string, number>, monPrice = 0): Promise<AprEntry | null> {
+async function fetchShMonad(monPrice = 0): Promise<AprEntry | null> {
   // floppy-backup API is blocked server-side (403) — use on-chain ERC4626 pricePerShare delta
   // Confirmed working: convertToAssets(1e18) responds, 7d APR ~11-15%
   try {
@@ -1015,7 +903,7 @@ async function fetchLSTVaults(
   const [kintsuR, magmaR, shmonadR] = await Promise.allSettled([
     fetchKintsusMON(nativeApyMap, kintsuTvl),
     fetchMagmaOnchain(),
-    fetchShMonad(nativeApyMap, monPrice),
+    fetchShMonad(monPrice),
   ])
 
   const entries: AprEntry[] = []
@@ -1123,27 +1011,16 @@ const CURVANCE_NATIVE_MARKETS: Array<{ symbol: string; label: string; isStable: 
   { symbol: 'syzUSD', label: 'Curvance syzUSD/AUSD',  isStable: true  },
 ]
 
-async function fetchCurvance(nativeApyMap: Map<string, number>, llamaTvls: Map<string, number>): Promise<AprEntry[]> {
+async function fetchCurvance(nativeApyMap: Map<string, number>, llamaTvls: Map<string, number>, merklData: any[]): Promise<AprEntry[]> {
   try {
-    const res = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?items=100&mainProtocolId=curvance&action=LEND&chainId=143',
-      {
-        signal: AbortSignal.timeout(10_000),
-        cache: 'no-store',
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        },
-      }
+    // Filtrar dados Merkl já disponíveis: Curvance LEND opportunities
+    const data = merklData.filter((o: any) =>
+      (o.mainProtocol ?? o.protocol) === 'curvance' && o.action === 'LEND'
     )
-    if (!res.ok) return []
-    const raw = await res.json()
-    const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
     const entries: AprEntry[] = []
     const merklSymbols = new Set<string>()
 
     for (const opp of data) {
-      if (opp.status !== 'LIVE') continue
       const apr = Number(opp.apr ?? 0)
       if (apr <= 0) continue
 
@@ -1259,29 +1136,30 @@ async function fetchMidas(): Promise<AprEntry[]> {
 
 // ─── Fetch all data (used by cache) ──────────────────────────────────────────
 async function fetchAllData() {
-  // Fetch shared data first — native APY, MON price, DeFiLlama TVLs (parallel)
-  const [nativeApyMap, monPrice, llamaTvls] = await Promise.all([
+  // Fase 1 — dados compartilhados em paralelo (sem dependências entre si)
+  // merklData e upshiftVaults são reutilizados por múltiplos fetchers abaixo
+  const [nativeApyMap, monPrice, llamaTvls, merklData, upshiftVaults] = await Promise.all([
     fetchFloppyNativeApy(),
     fetchMonPrice(),
     fetchDeFiLlamaTvls(),
+    fetchMerklAll(),
+    fetchUpshiftRaw(),
   ])
 
-  const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, kuruPoolsR, lstR, uniR, pancakeR, kintsuVaultR, upshiftR, gearboxR, curvanceR, midasR] =
+  // Fase 2 — todos os fetchers em paralelo
+  const [morphoR, neverlandR, eulerR, lagoonR, kuruR, kuruPoolsR, lstR, uniR, pancakeR, gearboxR, curvanceR, midasR] =
     await Promise.allSettled([
       fetchMorpho(),
       fetchNeverland(monPrice),
       fetchEulerV2(),
-      fetchCurve(),
       fetchLagoon(),
       fetchKuru(),
       fetchKuruPools(),
       fetchLSTVaults(nativeApyMap, monPrice, llamaTvls),
       fetchUniswap(),
-      fetchPancakeswap(),
-      fetchKintsuVault(llamaTvls.get('kintsu') ?? 0),
-      fetchUpshift(),
+      fetchPancakeswap(merklData),
       fetchGearbox(),
-      fetchCurvance(nativeApyMap, llamaTvls),
+      fetchCurvance(nativeApyMap, llamaTvls, merklData),
       fetchMidas(),
     ])
 
@@ -1293,15 +1171,15 @@ async function fetchAllData() {
     ...unwrap(morphoR),
     ...unwrap(neverlandR),
     ...unwrap(eulerR),
-    ...unwrap(curveR),
+    ...parseCurve(merklData),
     ...unwrap(lagoonR),
     ...unwrap(kuruR),
     ...unwrap(kuruPoolsR),
     ...unwrap(lstR),
     ...unwrap(uniR),
     ...unwrap(pancakeR),
-    ...unwrap(kintsuVaultR),
-    ...unwrap(upshiftR),
+    ...fetchKintsuVault(upshiftVaults, llamaTvls.get('kintsu') ?? 0),
+    ...parseUpshift(upshiftVaults),
     ...unwrap(gearboxR),
     ...unwrap(curvanceR),
     ...unwrap(midasR),
