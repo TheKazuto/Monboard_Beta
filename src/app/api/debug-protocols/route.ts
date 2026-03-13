@@ -1,154 +1,89 @@
 import { NextResponse } from 'next/server'
 
-// ─── DEBUG ROUTE — Upshift Pools API Discovery ───────────────────────────────
-// Arquivo temporário para investigar o endpoint /api/proxy/pools do Upshift.
-// Deploy → acesse /api/debug-upshift para ver os resultados.
-// Remova este arquivo após a investigação.
+export const revalidate = 0
 
-const UPSHIFT_PROXY_URL = 'https://app.upshift.finance/api/proxy/vaults'
+// ─── DEBUG: testa api.upshift.finance do ambiente Cloudflare ─────────────────
+// Deploy → src/app/api/debug-upshift/route.ts
+// Acesse /api/debug-upshift para ver por que fetchUpshiftRaw falha em produção
 
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Accept': 'application/json',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Origin': 'https://app.upshift.finance',
-  'Referer': 'https://app.upshift.finance/pools',
-}
-
-type EndpointResult = {
-  url: string
-  status: number | string
-  ok: boolean
-  bodyPreview?: any
-  error?: string
-  timing_ms?: number
-}
-
-async function probeEndpoint(url: string, method = 'GET', body?: object): Promise<EndpointResult> {
+async function probe(label: string, url: string, options: RequestInit = {}) {
   const t0 = Date.now()
   try {
     const res = await fetch(url, {
-      method,
-      headers: {
-        ...HEADERS,
-        ...(body ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(12_000),
       cache: 'no-store',
+      ...options,
     })
-    const timing_ms = Date.now() - t0
-    const contentType = res.headers.get('content-type') ?? ''
-    let bodyPreview: any = null
+    const timing = Date.now() - t0
+    const ct = res.headers.get('content-type') ?? ''
+    let body: any = null
+    const text = await res.text().catch(() => '')
 
     if (res.ok) {
       try {
-        const text = await res.text()
-        // Try to parse as JSON
         const parsed = JSON.parse(text)
-        // Summarize the structure instead of returning everything
         if (Array.isArray(parsed)) {
-          bodyPreview = {
+          const monad = parsed.filter((v: any) => v?.chain === 143)
+          body = {
             type: 'array',
-            length: parsed.length,
-            first_item_keys: parsed[0] ? Object.keys(parsed[0]) : [],
-            first_item_sample: parsed[0] ? summarize(parsed[0]) : null,
-          }
-        } else if (typeof parsed === 'object' && parsed !== null) {
-          bodyPreview = {
-            type: 'object',
-            keys: Object.keys(parsed),
-            data_array_length: Array.isArray(parsed.data) ? parsed.data.length : undefined,
-            first_data_item_keys: Array.isArray(parsed.data) && parsed.data[0] ? Object.keys(parsed.data[0]) : undefined,
-            first_data_item_sample: Array.isArray(parsed.data) && parsed.data[0] ? summarize(parsed.data[0]) : undefined,
+            total: parsed.length,
+            monad_count: monad.length,
+            monad_names: monad.map((v: any) => v?.vault_name),
+            first_keys: parsed[0] ? Object.keys(parsed[0]) : [],
           }
         } else {
-          bodyPreview = { raw: text.slice(0, 500) }
+          body = { type: 'object', keys: Object.keys(parsed).slice(0, 10) }
         }
       } catch {
-        bodyPreview = { content_type: contentType, raw_preview: '(não é JSON)' }
+        body = { raw: text.slice(0, 300) }
       }
     } else {
-      // For errors, just capture a short preview
-      try {
-        const text = await res.text()
-        bodyPreview = text.slice(0, 200)
-      } catch {
-        bodyPreview = null
-      }
+      body = text.slice(0, 200)
     }
 
-    return { url, status: res.status, ok: res.ok, bodyPreview, timing_ms }
-  } catch (err: any) {
-    return {
-      url,
-      status: 'TIMEOUT/ERROR',
-      ok: false,
-      error: err?.message ?? String(err),
-      timing_ms: Date.now() - t0,
-    }
+    return { label, url, status: res.status, ok: res.ok, content_type: ct, timing_ms: timing, body }
+  } catch (e: any) {
+    return { label, url, status: 0, ok: false, error: e?.message ?? String(e), timing_ms: Date.now() - t0 }
   }
-}
-
-// Recursively summarize nested objects for readability
-function summarize(obj: any, depth = 0): any {
-  if (depth > 2) return '...'
-  if (obj === null || obj === undefined) return obj
-  if (typeof obj !== 'object') return obj
-  if (Array.isArray(obj)) {
-    return obj.slice(0, 2).map(i => summarize(i, depth + 1))
-  }
-  const result: any = {}
-  for (const [k, v] of Object.entries(obj)) {
-    result[k] = summarize(v, depth + 1)
-  }
-  return result
 }
 
 export async function GET() {
-  const results: Record<string, any> = {}
+  const results = await Promise.all([
+    // 1. Novo endpoint — sem headers
+    probe('1_new_api_no_headers', 'https://api.upshift.finance/metrics/vaults_summary'),
 
-  // ── 1. Endpoint conhecido que funcionava antes ───────────────────────────────
-  results['1_proxy_vaults_GET'] = await probeEndpoint(UPSHIFT_PROXY_URL)
+    // 2. Novo endpoint — com Accept
+    probe('2_new_api_accept_json', 'https://api.upshift.finance/metrics/vaults_summary', {
+      headers: { 'Accept': 'application/json' },
+    }),
 
-  // ── 2. Novo endpoint a descobrir: /api/proxy/pools ───────────────────────────
-  results['2_proxy_pools_GET'] = await probeEndpoint('https://app.upshift.finance/api/proxy/pools')
+    // 3. Novo endpoint — com User-Agent de browser
+    probe('3_new_api_user_agent', 'https://api.upshift.finance/metrics/vaults_summary', {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+      },
+    }),
 
-  // ── 3. Variações com chainId na query string ─────────────────────────────────
-  results['3_proxy_pools_chainId'] = await probeEndpoint('https://app.upshift.finance/api/proxy/pools?chainId=143')
+    // 4. Health check — confirma que o domínio resolve
+    probe('4_health_check', 'https://api.upshift.finance/health'),
 
-  // ── 4. Endpoint público alternativo sem /proxy ───────────────────────────────
-  results['4_api_pools_chainId'] = await probeEndpoint('https://app.upshift.finance/api/pools?chainId=143')
+    // 5. Old endpoint — ainda bloqueado?
+    probe('5_old_proxy_vaults', 'https://app.upshift.finance/api/proxy/vaults', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'application/json',
+        'Origin': 'https://app.upshift.finance',
+        'Referer': 'https://app.upshift.finance/',
+      },
+    }),
 
-  // ── 5. Endpoint de vaults com chainId ────────────────────────────────────────
-  results['5_proxy_vaults_chainId'] = await probeEndpoint(`${UPSHIFT_PROXY_URL}?chainId=143`)
-
-  // ── 6. Probe de URL base da API backend (fora do app.) ───────────────────────
-  results['6_api_subdomain_pools'] = await probeEndpoint('https://api.upshift.finance/pools')
-  results['7_api_subdomain_vaults'] = await probeEndpoint('https://api.upshift.finance/vaults?chainId=143')
-
-  // ── 8. Probe com POST no /proxy/pools (alguns proxies aceitam POST) ──────────
-  results['8_proxy_pools_POST'] = await probeEndpoint(
-    'https://app.upshift.finance/api/proxy/pools',
-    'POST',
-    { chainId: 143 }
-  )
-
-  // ── 9. Se /proxy/vaults retornou dados, extrair amostra completa de 1 vault ──
-  const vaultsResult = results['1_proxy_vaults_GET']
-  if (vaultsResult.ok && vaultsResult.bodyPreview?.first_data_item_sample) {
-    results['9_vault_full_sample'] = vaultsResult.bodyPreview.first_data_item_sample
-  }
-
-  // ── 10. Se /proxy/pools retornou dados, extrair amostra completa de 1 pool ───
-  const poolsResult = results['2_proxy_pools_GET']
-  if (poolsResult.ok && poolsResult.bodyPreview?.first_data_item_sample) {
-    results['10_pool_full_sample'] = poolsResult.bodyPreview.first_data_item_sample
-  }
+    // 6. DNS — verifica se o CF consegue resolver o domínio
+    probe('6_openapi_schema', 'https://api.upshift.finance/openapi.json'),
+  ])
 
   return NextResponse.json({
     generated_at: new Date().toISOString(),
-    note: 'Debug temporário para descoberta de API de pools do Upshift. Remover após investigação.',
-    results,
+    results: Object.fromEntries(results.map(r => [r.label, r])),
   })
 }
