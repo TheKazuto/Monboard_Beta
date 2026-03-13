@@ -1,149 +1,133 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { MONAD_RPC as RPC, rpcBatch, getMonPrice } from '@/lib/monad'
+import { getMonPrice } from '@/lib/monad'
 
 export const revalidate = 0
 
 // ─── Security: SSRF protection for metadata fetching ─────────────────────────
-// Block fetches to private/internal IP ranges and non-HTTPS protocols.
-// A strict host allowlist was too restrictive (NFTs use hundreds of CDNs).
-// These two checks cover the actual attack surface.
-
 const PRIVATE_IP_RE = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|::1|fc00:|fd)/
 
 function isSafeMetaUrl(url: string): boolean {
   if (!url) return false
   try {
     const u = new URL(url)
-    if (u.protocol !== 'https:') return false           // HTTPS only — blocks file:, data:, javascript:, http:
-    if (PRIVATE_IP_RE.test(u.hostname)) return false    // block internal IPs
+    if (u.protocol !== 'https:') return false
+    if (PRIVATE_IP_RE.test(u.hostname)) return false
     if (u.hostname === 'localhost' || u.hostname.endsWith('.local')) return false
     return true
   } catch { return false }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function padUint256(n: bigint) { return n.toString(16).padStart(64, '0') }
-function decodeString(hex: string): string {
-  try {
-    if (!hex || hex === '0x') return ''
-    const b = Buffer.from(hex.slice(2), 'hex')
-    if (b.length < 64) return ''
-    const len = Number(BigInt('0x' + b.slice(32, 64).toString('hex')))
-    return b.slice(64, 64 + len).toString('utf8').replace(/\0/g, '')
-  } catch { return '' }
-}
 function resolveURI(uri: string): string {
   if (!uri) return ''
   return uri.startsWith('ipfs://') ? uri.replace('ipfs://', 'https://ipfs.io/ipfs/') : uri
 }
 
-// Security: sanitize image URL before sending to client (fix #13)
-// Only allow HTTPS URLs — blocks javascript:, data:, file:, http:
 function sanitizeImage(raw: string | null | undefined): string | null {
   if (!raw) return null
   const resolved = resolveURI(String(raw))
   return isSafeMetaUrl(resolved) ? resolved : null
 }
 
-// ─── Step 1 ───────────────────────────────────────────────────────────────────
-async function discoverNFTs(address: string, apiKey: string) {
-  // Security fix #5: use URL object so the API key is set via searchParams,
-  // not interpolated into a template string (avoids accidental log exposure).
-  const url = new URL('https://api.etherscan.io/v2/api')
-  url.searchParams.set('chainid', '143')
-  url.searchParams.set('module',  'account')
-  url.searchParams.set('action',  'tokennfttx')
-  url.searchParams.set('address', address)
-  url.searchParams.set('page',    '1')
-  url.searchParams.set('offset',  '100')
-  url.searchParams.set('sort',    'desc')
-  url.searchParams.set('apikey',  apiKey)
+// ─── OpenSea API helpers ──────────────────────────────────────────────────────
+// Chain identifier used by OpenSea for Monad mainnet
+const OS_CHAIN = 'monad'
+const OS_BASE  = 'https://api.opensea.io/api/v2'
 
-  const res  = await fetch(url.toString(), { cache: 'no-store', signal: AbortSignal.timeout(12_000) })
-  const data = await res.json()
-  if (data.status !== '1') {
-    if (data.message?.includes('No transactions') || data.message?.includes('No records')) return []
-    throw new Error(`Etherscan: ${data.message}`)
+function osHeaders(apiKey: string): Record<string, string> {
+  return {
+    'x-api-key': apiKey,
+    'Accept':    'application/json',
   }
-  const addrLower = address.toLowerCase()
-  const lastTx    = new Map<string, any>()
-  for (const tx of data.result as any[]) {
-    const key = `${tx.contractAddress.toLowerCase()}_${BigInt(tx.tokenID)}`
-    if (!lastTx.has(key)) lastTx.set(key, tx)
+}
+
+// ─── Step 1: Fetch NFTs owned by account via OpenSea ─────────────────────────
+// Replaces: Etherscan tokennfttx discovery + on-chain ownerOf verification +
+//           on-chain tokenURI + off-chain metadata fetch.
+// OpenSea returns name, image, collection slug, contract, tokenId in one call.
+
+interface OSNft {
+  identifier:   string   // token id (string)
+  collection:   string   // collection slug
+  contract:     string   // contract address (lowercase)
+  name:         string | null
+  image_url:    string | null
+  metadata_url: string | null
+}
+
+async function fetchNFTsFromOpenSea(
+  address: string,
+  apiKey:  string,
+): Promise<OSNft[]> {
+  const all: OSNft[] = []
+  let next: string | null = null
+  const limit = 50
+
+  // Paginate up to 200 NFTs (4 pages) to avoid very long responses
+  for (let page = 0; page < 4; page++) {
+    const url = new URL(`${OS_BASE}/chain/${OS_CHAIN}/account/${address}/nfts`)
+    url.searchParams.set('limit', String(limit))
+    if (next) url.searchParams.set('next', next)
+
+    const res = await fetch(url.toString(), {
+      headers: osHeaders(apiKey),
+      signal:  AbortSignal.timeout(12_000),
+      cache:   'no-store',
+    })
+
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        throw new Error('opensea_invalid_key')
+      }
+      if (res.status === 404) break // chain/address not found = no NFTs
+      throw new Error(`OpenSea error ${res.status}`)
+    }
+
+    const data = await res.json()
+    const nfts: any[] = data?.nfts ?? []
+    for (const n of nfts) {
+      all.push({
+        identifier:   String(n.identifier ?? ''),
+        collection:   String(n.collection ?? ''),
+        contract:     String(n.contract   ?? '').toLowerCase(),
+        name:         n.name         ?? null,
+        image_url:    n.image_url    ?? null,
+        metadata_url: n.metadata_url ?? null,
+      })
+    }
+
+    next = data?.next ?? null
+    if (!next || nfts.length < limit) break
   }
-  return [...lastTx.values()]
-    .filter(tx => tx.to?.toLowerCase() === addrLower)
-    .map(tx => ({ contract: tx.contractAddress.toLowerCase(), tokenId: BigInt(tx.tokenID) }))
+
+  return all
 }
 
-// ─── Step 2 ───────────────────────────────────────────────────────────────────
-async function verifyOwnership(candidates: { contract: string; tokenId: bigint }[], address: string) {
-  const calls = candidates.map((c, i) => ({
-    jsonrpc: '2.0', method: 'eth_call',
-    params: [{ to: c.contract, data: '0x6352211e' + padUint256(c.tokenId) }, 'latest'],
-    id: i,
-  }))
-  const results: any[] = []
-  for (let i = 0; i < calls.length; i += 20)
-    results.push(...await rpcBatch(calls.slice(i, i + 20)))
-  const lo = address.toLowerCase()
-  return candidates.filter((_, i) => {
-    const r = results[i]?.result
-    return r && r.length >= 26 && ('0x' + r.slice(-40)).toLowerCase() === lo
-  })
-}
+// ─── Step 2: Floor prices via OpenSea collection stats ───────────────────────
+// GET /api/v2/collections/{slug}/stats
+// Returns total.floor_price (in native token = MON on Monad).
 
-// ─── Step 3 ───────────────────────────────────────────────────────────────────
-async function fetchOnChainMeta(owned: { contract: string; tokenId: bigint }[]) {
-  const contracts = [...new Set(owned.map(t => t.contract))]
-  const [nameRes, symRes, uriRes] = await Promise.all([
-    rpcBatch(contracts.map((a, i) => ({ jsonrpc:'2.0', method:'eth_call', params:[{to:a,data:'0x06fdde03'},'latest'], id:i }))),
-    rpcBatch(contracts.map((a, i) => ({ jsonrpc:'2.0', method:'eth_call', params:[{to:a,data:'0x95d89b41'},'latest'], id:i }))),
-    rpcBatch(owned.map(({ contract, tokenId }, i) => ({ jsonrpc:'2.0', method:'eth_call', params:[{to:contract,data:'0xc87b56dd'+padUint256(tokenId)},'latest'], id:i }))),
-  ])
-  const cMeta: Record<string, { name: string; symbol: string }> = {}
-  contracts.forEach((a, i) => {
-    cMeta[a] = { name: decodeString(nameRes[i]?.result ?? ''), symbol: decodeString(symRes[i]?.result ?? '') }
-  })
-  return { cMeta, uriRes }
-}
-
-async function fetchTokenMeta(uri: string) {
-  try {
-    const url = resolveURI(uri)
-    // Security: only fetch metadata from HTTPS, non-private URLs
-    if (!isSafeMetaUrl(url)) return null
-    const r = await fetch(url, { signal: AbortSignal.timeout(5_000) })
-    return r.ok ? await r.json() : null
-  } catch { return null }
-}
-
-// ─── Step 4: Floor prices via Magic Eden ─────────────────────────────────────
 async function fetchFloorPrices(
-  _address: string,
-  contracts: string[]
+  slugs:  string[],
+  apiKey: string,
 ): Promise<Record<string, number>> {
   const floorMap: Record<string, number> = {}
-  contracts.forEach(c => { floorMap[c] = 0 })
 
-  await Promise.allSettled(contracts.map(async (contract) => {
-    try {
-      const url = `https://api-mainnet.magiceden.dev/v4/evm-public/assets/collection-assets?chain=monad&collectionId=${contract}&limit=1`
-      const r = await fetch(url, {
-        headers: { accept: 'application/json' },
-        signal: AbortSignal.timeout(8_000),
-        cache: 'no-store',
-      })
-      if (!r.ok) return
-      const body = await r.json()
-      const items: any[] = body?.assets ?? []
-      if (!items.length) return
-      // floorAsk is at the item wrapper level, not inside item.asset
-      const floorAsk = items[0]?.floorAsk
-      const floor = Number(floorAsk?.price?.amount?.native ?? 0)
-      if (floor > 0) floorMap[contract] = floor
-    } catch { /* ignore per-collection errors */ }
-  }))
+  await Promise.allSettled(
+    [...new Set(slugs)].filter(Boolean).map(async (slug) => {
+      try {
+        const res = await fetch(`${OS_BASE}/collections/${slug}/stats`, {
+          headers: osHeaders(apiKey),
+          signal:  AbortSignal.timeout(8_000),
+          cache:   'no-store',
+        })
+        if (!res.ok) return
+        const data = await res.json()
+        // total.floor_price is in the native token of the chain (MON for Monad)
+        const floor = Number(data?.total?.floor_price ?? 0)
+        if (floor > 0) floorMap[slug] = floor
+      } catch { /* skip per-collection errors */ }
+    })
+  )
 
   return floorMap
 }
@@ -155,46 +139,52 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid address' }, { status: 400 })
   }
 
-  const apiKey = process.env.ETHERSCAN_API_KEY
-  // Keep the original 'no_api_key' error — PortfolioContext checks for this exact string
-  if (!apiKey) return NextResponse.json({ error: 'no_api_key', nfts: [], nftValue: 0, total: 0 })
+  const apiKey = process.env.OPENSEA_API_KEY
+  // Keep same 'no_api_key' error string — PortfolioContext checks for it
+  if (!apiKey) {
+    return NextResponse.json({ error: 'no_api_key', nfts: [], nftValue: 0, total: 0 })
+  }
 
   try {
-    const candidates = await discoverNFTs(address, apiKey)
-    if (!candidates.length) return NextResponse.json({ nfts: [], nftValue: 0, total: 0 })
+    // ── 1. Fetch all owned NFTs from OpenSea ─────────────────────────────────
+    const osNfts = await fetchNFTsFromOpenSea(address, apiKey)
+    if (!osNfts.length) {
+      return NextResponse.json({ nfts: [], nftValue: 0, total: 0 })
+    }
 
-    const owned = await verifyOwnership(candidates, address)
-    if (!owned.length) return NextResponse.json({ nfts: [], nftValue: 0, total: 0 })
+    const total = osNfts.length
+    const cap   = osNfts.slice(0, 50) // display cap
 
-    const cap   = owned.slice(0, 20)
-    const total = owned.length
-    const { cMeta, uriRes } = await fetchOnChainMeta(cap)
-    const contracts = [...new Set(cap.map(t => t.contract))]
+    // ── 2. Collect unique slugs for floor price lookup ────────────────────────
+    const slugs = [...new Set(cap.map(n => n.collection).filter(Boolean))]
 
-    const [metaResults, floorMap, monPrice] = await Promise.all([
-      Promise.all(cap.map((_, i) => fetchTokenMeta(decodeString(uriRes[i]?.result ?? '')))),
-      fetchFloorPrices(address, contracts),
+    // ── 3. Fetch floor prices + MON price in parallel ─────────────────────────
+    const [floorMap, monPrice] = await Promise.all([
+      fetchFloorPrices(slugs, apiKey),
       getMonPrice(),
     ])
 
-    const nfts = cap.map(({ contract, tokenId }, i) => {
-      const cm         = cMeta[contract] ?? { name: '', symbol: '' }
-      const meta       = metaResults[i]
-      const floorMON   = floorMap[contract] ?? 0
-      const floorUSD   = floorMON * monPrice
-      const collection = cm.name || cm.symbol || `${contract.slice(0, 6)}...${contract.slice(-4)}`
+    // ── 4. Assemble response ──────────────────────────────────────────────────
+    const nfts = cap.map((n) => {
+      const floorMON = floorMap[n.collection] ?? 0
+      const floorUSD = floorMON * monPrice
+
+      // Collection display name: use slug with dashes replaced by spaces, title-cased
+      const collectionName = n.collection
+        ? n.collection.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+        : `${n.contract.slice(0, 6)}…${n.contract.slice(-4)}`
+
       return {
-        id:           `${contract}_${tokenId}`,
-        contract,
-        tokenId:      tokenId.toString(),
-        collection,
-        symbol:       cm.symbol,
-        name:         meta?.name ?? `${collection} #${tokenId}`,
-        // Security fix #13: sanitize image URL before sending to client
-        image:        sanitizeImage(meta?.image),
+        id:          `${n.contract}_${n.identifier}`,
+        contract:    n.contract,
+        tokenId:     n.identifier,
+        collection:  collectionName,
+        slug:        n.collection,
+        name:        n.name ?? `${collectionName} #${n.identifier}`,
+        image:       sanitizeImage(n.image_url),
         floorMON,
         floorUSD,
-        magicEdenUrl: `https://magiceden.io/collections/monad/${contract}`,
+        openSeaUrl:  `https://opensea.io/assets/${OS_CHAIN}/${n.contract}/${n.identifier}`,
       }
     })
 
@@ -202,6 +192,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ nfts, nftValue, total })
 
   } catch (err: any) {
+    // OpenSea invalid key — surface as no_api_key so UI shows correct message
+    if (err?.message === 'opensea_invalid_key') {
+      return NextResponse.json({ error: 'no_api_key', nfts: [], nftValue: 0, total: 0 })
+    }
     console.error('[nfts]', err?.message)
     return NextResponse.json({ error: err?.message ?? 'Failed' }, { status: 500 })
   }
