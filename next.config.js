@@ -1,28 +1,23 @@
 /** @type {import('next').NextConfig} */
 
 // ─── Strict Content-Security-Policy ──────────────────────────────────────────
-// Removes unsafe-eval and unsafe-inline from script-src.
-// RainbowKit/wagmi use style attributes on DOM elements, not <style> tags,
-// so 'unsafe-inline' in style-src is still required but harmless (can't exec JS).
 const CSP = [
   "default-src 'self'",
 
-  // Scripts: self + AdsTerra + unsafe-inline (required by Next.js 14 SSR hydration scripts)
-  // unsafe-eval remains REMOVED — prevents eval()/Function() injection attacks.
-  "script-src 'self' 'unsafe-inline' https://pl28909421.effectivegatecpm.com",
+  // Scripts: self + unsafe-inline (Next.js 14 SSR) + AdsTerra CDN domains.
+  // Wildcards needed: AdsTerra script loads sub-scripts from other subdomains.
+  "script-src 'self' 'unsafe-inline' https://*.effectivegatecpm.com https://*.highperformanceformat.com https://*.adsterra.com",
 
-  // Styles: unsafe-inline is OK here — it cannot cause script execution
+  // Styles
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
 
   // Fonts
   "font-src 'self' https://fonts.gstatic.com data:",
 
-  // Images: allow all HTTPS sources. NFT images come from unpredictable hosts
-  // so a fixed allowlist always breaks things. img-src cannot execute scripts —
-  // there is no XSS risk here. http: is still blocked; only https: is allowed.
+  // Images: allow all HTTPS — NFT images come from unpredictable hosts
   "img-src 'self' data: blob: https:",
 
-  // Connections: every upstream API, RPC, and WalletConnect endpoint
+  // Connections
   [
     "connect-src 'self'",
     "https://rpc.monad.xyz",
@@ -37,7 +32,11 @@ const CSP = [
     "https://api.alternative.me",
     "https://api.lagoon.finance",
     "https://app.renzoprotocol.com",
-    "https://pl28909421.effectivegatecpm.com",
+    // AdsTerra CDN + tracking
+    "https://*.effectivegatecpm.com",
+    "https://*.highperformanceformat.com",
+    "https://*.adsterra.com",
+    // WalletConnect
     "wss://relay.walletconnect.com",
     "wss://relay.walletconnect.org",
     "https://relay.walletconnect.com",
@@ -46,6 +45,7 @@ const CSP = [
     "https://api.web3modal.org",
     "https://pulse.walletconnect.org",
     "https://rainbowkit.com",
+    // Public RPC nodes
     "https://ethereum-rpc.publicnode.com",
     "https://bsc-rpc.publicnode.com",
     "https://polygon-rpc.com",
@@ -55,23 +55,23 @@ const CSP = [
     "https://api.avax.network",
   ].join(' '),
 
-  // Frames: AdsTerra (banner iframes)
-  "frame-src https://effectivegatecpm.com https://*.effectivegatecpm.com",
+  // Frames: AdsTerra iframes spawned by the ad script inside our srcdoc iframe.
+  // 'self' needed because our iframe srcdoc is same-origin.
+  "frame-src 'self' https://*.effectivegatecpm.com https://*.highperformanceformat.com https://*.adsterra.com",
 
   // Workers
   "worker-src 'self' blob:",
 
-  // Block plugins (Flash, etc.)
+  // Block plugins
   "object-src 'none'",
 
-  // Force HTTPS for all sub-resources
+  // Force HTTPS
   "upgrade-insecure-requests",
 ].join('; ')
 
 const nextConfig = {
   images: {
     // Cloudflare Pages does not support Next.js Image Optimization API.
-    // Using unoptimized mode — images served as-is (project uses <img> tags anyway).
     unoptimized: true,
     remotePatterns: [
       { protocol: 'https', hostname: 'assets.coingecko.com' },
