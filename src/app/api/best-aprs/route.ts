@@ -302,7 +302,8 @@ function parseCurve(merklData: any[]): AprEntry[] {
 
 // ─── UPSHIFT — vaults via api.upshift.finance/metrics/vaults_summary ─────────
 // Source: https://api.upshift.finance/metrics/vaults_summary (sem bot-protection)
-// APY fields em decimal: 7d_apy > 30d_apy > target_apy (ex: 0.119 = 11.9%)
+// APY preference: melhor entre 7d/30d (se >= 0.5%) → target_apy como fallback
+// Monad mainnet é nova: 7d/30d histórico ainda pode ser ruído (<0.5%) → usa target
 // TVL: total_assets * underlying_price (USD para stablecoins; DeFiLlama para LSTs)
 // superMON (0x792C) ignorado aqui — coberto por fetchKintsuVault
 // fetchUpshiftRaw() é chamado uma vez no fetchAllData e compartilhado com fetchKintsuVault
@@ -350,8 +351,10 @@ function parseUpshift(vaults: any[]): AprEntry[] {
     const apy30d = v['30d_apy']  != null ? Number(v['30d_apy'])  : null
     const target = v.target_apy  != null ? Number(v.target_apy) : null
 
-    const apyDecimal = (apy7d != null && apy7d > 0) ? apy7d
-      : (apy30d != null && apy30d > 0) ? apy30d
+    // Threshold 0.5%: histórico < 0.005 em vaults novos é ruído — usa target
+    const MIN_HIST = 0.005
+    const bestHist = Math.max(apy7d ?? 0, apy30d ?? 0)
+    const apyDecimal = (bestHist >= MIN_HIST) ? bestHist
       : (target != null && target > 0) ? target
       : null
 
