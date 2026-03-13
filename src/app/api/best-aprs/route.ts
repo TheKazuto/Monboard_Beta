@@ -414,43 +414,45 @@ async function fetchLagoon(): Promise<AprEntry[]> {
 }
 
 // ─── KURU — vault pool APRs via Merkl ────────────────────────────────────────
-// Source: https://api.merkl.xyz/v4/opportunities?mainProtocolId=kuru&chainId=143
-// APR field is already in percentage. Tokens are the two assets in the LP vault.
-// depositUrl points directly to https://www.kuru.io/vaults/<address>
+// Source: https://api.kuru.io/api/v3/vaults
+// Returns { data: { data: [{ vaultAddress, apy, tvl, quoteToken, baseToken }] } }
+// apy is decimal (0..1), e.g. 0.74 = 74% APY — converted to APR via apyToApr()
 async function fetchKuru(): Promise<AprEntry[]> {
   try {
     const res = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?mainProtocolId=kuru&chainId=143',
+      'https://api.kuru.io/api/v3/vaults',
       {
         signal: AbortSignal.timeout(8_000),
         cache: 'no-store',
-        headers: { 'Accept': 'application/json' },
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Origin': 'https://www.kuru.io',
+          'Referer': 'https://www.kuru.io/',
+        },
       }
     )
     if (!res.ok) return []
     const raw = await res.json()
-    const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
+    const vaults: any[] = raw?.data?.data ?? []
     const entries: AprEntry[] = []
 
-    for (const opp of data) {
-      if (opp.status !== 'LIVE') continue
-      const apr = Number(opp.apr ?? 0)
-      if (apr <= 0) continue
+    for (const vault of vaults) {
+      const apyDecimal = Number(vault.apy ?? 0)
+      if (apyDecimal <= 0) continue
 
-      const tokens: string[] = (opp.tokens ?? [])
-        .map((t: any) => String(t.symbol ?? ''))
-        .filter(Boolean)
+      const apr = apyToApr(apyDecimal) * 100   // convert APY decimal → APR %
 
-      // "Provide liquidity to Kuru MON-AUSD vault" -> "MON / AUSD"
-      const nameMatch = (opp.name as string)?.match(/Kuru (.+?) vault/)
-      const pairLabel = nameMatch
-        ? nameMatch[1].replace('-', ' / ')
-        : tokens.join(' / ')
+      const baseSymbol = String(vault.baseToken?.ticker ?? vault.baseToken?.name ?? 'MON')
+      const quoteSymbol = String(vault.quoteToken?.ticker ?? vault.quoteToken?.name ?? '')
+      const tokens = [baseSymbol, quoteSymbol].filter(Boolean)
+      const pairLabel = tokens.join(' / ')
+      const vaultUrl = `https://www.kuru.io/vaults/${vault.vaultAddress ?? ''}`
 
       entries.push({
         protocol: 'Kuru',
         logo: '🔄',
-        url: opp.depositUrl ?? 'https://www.kuru.io/vaults',
+        url: vaultUrl,
         tokens,
         label: `Kuru ${pairLabel}`,
         apr,
