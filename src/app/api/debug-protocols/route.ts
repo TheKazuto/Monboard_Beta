@@ -1,111 +1,56 @@
 import { NextResponse } from 'next/server'
 
+export const dynamic = 'force-dynamic'
+
+async function testEndpoint(label: string, url: string, headers: Record<string, string> = {}) {
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(10_000),
+      cache: 'no-store',
+      headers: { 'Accept': 'application/json', ...headers },
+    })
+    const text = await res.text()
+    let parsed: any = null
+    try { parsed = JSON.parse(text) } catch {}
+
+    return {
+      label,
+      status: res.status,
+      ok: res.ok,
+      bodySnippet: text.slice(0, 600),
+      vaultCount: parsed?.data?.data?.length ?? null,
+      vaults: parsed?.data?.data?.map((v: any) => ({
+        vaultAddress: v.vaultAddress,
+        apy: v.apy,
+        tvl: v.tvl,
+        baseToken: v.baseToken?.ticker ?? v.baseToken?.name,
+        quoteToken: v.quoteToken?.ticker ?? v.quoteToken?.name,
+        aprPct: v.apy
+          ? `${((Math.pow(1 + Number(v.apy), 1 / 365) - 1) * 365 * 100).toFixed(2)}%`
+          : null,
+      })) ?? null,
+    }
+  } catch (e: any) {
+    return { label, error: e?.message ?? String(e) }
+  }
+}
+
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Origin': 'https://www.kuru.io',
+  'Referer': 'https://www.kuru.io/',
+}
+
 export async function GET() {
-  const results: any = {}
+  const results = await Promise.allSettled([
+    testEndpoint('v3/vaults — sem headers', 'https://api.kuru.io/api/v3/vaults'),
+    testEndpoint('v3/vaults — browser headers', 'https://api.kuru.io/api/v3/vaults', BROWSER_HEADERS),
+    testEndpoint('v2/vaults — browser headers', 'https://api.kuru.io/api/v2/vaults', BROWSER_HEADERS),
+    testEndpoint('merkl — kuru chainId=143', 'https://api.merkl.xyz/v4/opportunities?mainProtocolId=kuru&chainId=143'),
+  ])
 
-  // Test 1: raw fetch sem headers
-  try {
-    const r = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?items=5&mainProtocolId=curvance&action=LEND&chainId=143',
-      { cache: 'no-store', signal: AbortSignal.timeout(10_000) }
-    )
-    const text = await r.text()
-    results.test1_no_headers = {
-      status: r.status,
-      ok: r.ok,
-      bodyPreview: text.slice(0, 300),
-      isJSON: text.startsWith('[') || text.startsWith('{'),
-    }
-  } catch (e: any) {
-    results.test1_no_headers = { error: e.message }
-  }
-
-  // Test 2: com browser headers
-  try {
-    const r = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?items=5&mainProtocolId=curvance&action=LEND&chainId=143',
-      {
-        cache: 'no-store',
-        signal: AbortSignal.timeout(10_000),
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        },
-      }
-    )
-    const text = await r.text()
-    results.test2_browser_headers = {
-      status: r.status,
-      ok: r.ok,
-      bodyPreview: text.slice(0, 300),
-      isJSON: text.startsWith('[') || text.startsWith('{'),
-    }
-  } catch (e: any) {
-    results.test2_browser_headers = { error: e.message }
-  }
-
-  // Test 3: parse JSON and count items
-  try {
-    const r = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?items=100&mainProtocolId=curvance&action=LEND&chainId=143',
-      {
-        cache: 'no-store',
-        signal: AbortSignal.timeout(10_000),
-        headers: { 'Accept': 'application/json' },
-      }
-    )
-    const raw = await r.json()
-    const items: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
-    const live = items.filter((x: any) => x.status === 'LIVE' && Number(x.apr ?? 0) > 0)
-    results.test3_parse = {
-      status: r.status,
-      rawType: Array.isArray(raw) ? 'array' : typeof raw,
-      rawTopLevelKeys: Array.isArray(raw) ? null : Object.keys(raw).slice(0, 5),
-      totalItems: items.length,
-      liveWithApr: live.length,
-      firstItem: live[0] ? {
-        name: live[0].name,
-        apr: live[0].apr,
-        status: live[0].status,
-        tokenCount: live[0].tokens?.length,
-      } : null,
-    }
-  } catch (e: any) {
-    results.test3_parse = { error: e.message }
-  }
-
-  // Test 4: check if issue is in the token-finding logic
-  try {
-    const r = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?items=100&mainProtocolId=curvance&action=LEND&chainId=143',
-      { cache: 'no-store', signal: AbortSignal.timeout(10_000) }
-    )
-    const raw = await r.json()
-    const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? [])
-    const entries: any[] = []
-
-    for (const opp of data) {
-      if (opp.status !== 'LIVE') continue
-      const apr = Number(opp.apr ?? 0)
-      if (apr <= 0) continue
-
-      const tokens: any[] = opp.tokens ?? []
-      const underlying =
-        tokens.find((t: any) => !/^c[A-Za-z]/.test(t.symbol ?? '')) ??
-        tokens.find((t: any) => t.verified === true) ??
-        tokens[0]
-      const sym = underlying?.symbol ?? 'TOKEN'
-
-      entries.push({ name: opp.name, apr, sym, tokenSymbols: tokens.map((t: any) => t.symbol) })
-    }
-
-    results.test4_full_logic = {
-      entriesProduced: entries.length,
-      entries: entries.slice(0, 5),
-    }
-  } catch (e: any) {
-    results.test4_full_logic = { error: e.message }
-  }
-
-  return NextResponse.json(results, { headers: { 'Cache-Control': 'no-store' } })
+  return NextResponse.json({
+    ts: new Date().toISOString(),
+    results: results.map(r => r.status === 'fulfilled' ? r.value : { error: (r as any).reason?.message }),
+  })
 }
