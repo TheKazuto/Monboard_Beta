@@ -151,22 +151,47 @@ const NEVERLAND_ASSETS = [
   { address: '0x1b68626dca36c7fe922fd2d55e4f631d962de19c', symbol: 'shMON' },
 ]
 
-async function fetchNeverland(): Promise<AprEntry[]> {
+async function fetchNeverland(monPrice: number): Promise<AprEntry[]> {
   try {
     const calls = NEVERLAND_ASSETS.map((a, i) =>
       ethCall(NEVERLAND_POOL, '0x35ea6a75' + a.address.slice(2).toLowerCase().padStart(64, '0'), i)
     )
     const results = await rpcBatch(calls)
-    const out: AprEntry[] = []
 
+    // Extract aToken address from slot[8] of each getReserveData response
+    // AAVE V3 ReserveData struct: slot[8] = aToken address (last 20 bytes of the 32-byte slot)
+    const aTokenCalls = results.map((r: any, i: number) => {
+      const hex = (r?.result ?? '').slice(2)
+      const slots: string[] = []
+      for (let j = 0; j < hex.length; j += 64) slots.push(hex.slice(j, j + 64))
+      const aToken = slots.length > 8
+        ? '0x' + slots[8].slice(-40)
+        : '0x0000000000000000000000000000000000000000'
+      return ethCall(aToken, '0x18160ddd', i + 200)  // totalSupply()
+    })
+    const tsResults = await rpcBatch(aTokenCalls)
+
+    const out: AprEntry[] = []
     NEVERLAND_ASSETS.forEach((asset, i) => {
       const hex = results[i]?.result ?? ''
       const supplyApr = rayToApr(hex, 2)
       if (supplyApr < 0.01) return
+
+      // Compute TVL from aToken totalSupply × price
+      // stable → $1, MON-pegged LSTs → monPrice, WBTC/WETH → skip (no price feed)
+      let tvl = 0
+      if (asset.priceType !== 'skip') {
+        const tsRaw = tsResults[i]?.result ?? '0x'
+        const supply = tsRaw && tsRaw !== '0x'
+          ? Number(BigInt(tsRaw)) / Math.pow(10, asset.decimals)
+          : 0
+        tvl = supply * (asset.priceType === 'stable' ? 1 : monPrice)
+      }
+
       out.push({
         protocol: 'Neverland', logo: '🌙', url: 'https://app.neverland.money',
         tokens: [asset.symbol], label: asset.symbol,
-        apr: supplyApr, tvl: 0, type: 'lend', isStable: isStable(asset.symbol),
+        apr: supplyApr, tvl, type: 'lend', isStable: isStable(asset.symbol),
       })
     })
     return out
@@ -599,7 +624,7 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
 
 const KINTSU_VAULT_ADDRESS = '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'
 
-async function fetchKintsuVault(): Promise<AprEntry[]> {
+async function fetchKintsuVault(kintsuTvl = 0): Promise<AprEntry[]> {
   try {
     const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
       signal: AbortSignal.timeout(10_000), cache: 'no-store',
@@ -617,11 +642,11 @@ async function fetchKintsuVault(): Promise<AprEntry[]> {
     if (typeof apyDecimal !== 'number' || apyDecimal <= 0) return []
 
     const apr = Math.min(365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100, 200)
-    return [buildKintsuEntry(apr)]
+    return [buildKintsuEntry(apr, kintsuTvl)]
   } catch { return [] }
 }
 
-function buildKintsuEntry(apr: number): AprEntry {
+function buildKintsuEntry(apr: number, tvl = 0): AprEntry {
   return {
     protocol: 'Kintsu',
     logo: '🔵',
@@ -629,7 +654,7 @@ function buildKintsuEntry(apr: number): AprEntry {
     tokens: ['WMON'],
     label: 'superMON Vault',
     apr,
-    tvl: 0,
+    tvl,
     type: 'vault',
     isStable: false,
   }
@@ -802,7 +827,7 @@ async function fetchERC4626Vaults<T extends VaultMeta>(
 //   tvlInMON = tvlMats[0].sum / 1e18  (BigInt, 18 decimals)
 // APY → APR via daily compounding, capped at 500%.
 
-async function fetchMagmaOnchain(): Promise<any> {
+async function fetchMagmaOnchain(): Promise<{ apr: number; tvlInMON: number } | null> {
   try {
     const res = await fetch('https://magma-http-app.fly.dev/graphql', {
       method: 'POST',
@@ -825,7 +850,7 @@ async function fetchMagmaOnchain(): Promise<any> {
 
     const apy = 13 + (19_200_000 / tvlInMON * 100)   // % APY
     const apr = Math.min(365 * (Math.pow(1 + apy / 100, 1 / 365) - 1) * 100, 500)
-    return apr > 0 ? { apr } : null
+    return apr > 0 ? { apr, tvlInMON } : null
   } catch { return null }
 }
 
@@ -877,7 +902,7 @@ const KINTSU_LST_QUERY = `{
   }
 }`
 
-async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
+async function fetchKintsusMON(nativeApyMap: Map<string, number>, kintsuTvl = 0): Promise<AprEntry | null> {
   // Primary: kintsu.xyz/api/graphql — returns 500 server-side, kept for future recovery.
   // Fallback: Floppy SMON APY from nativeApyMap (confirmed working).
   try {
@@ -902,7 +927,7 @@ async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEn
           if (apr > 0) return {
             protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
             tokens: ['sMON'], label: 'Staked MON',
-            apr, tvl: 0, type: 'vault', isStable: false,
+            apr, tvl: kintsuTvl, type: 'vault', isStable: false,
           }
         }
       }
@@ -917,7 +942,7 @@ async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEn
   return {
     protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
     tokens: ['sMON'], label: 'Staked MON',
-    apr, tvl: 0, type: 'vault', isStable: false,
+    apr, tvl: kintsuTvl, type: 'vault', isStable: false,
   }
 }
 
@@ -926,27 +951,39 @@ async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEn
 // asset() = 0xeeee...ee (native MON). api.shmonad.xyz is offline (530).
 const SHMON_ADDRESS = '0x1B68626dCa36c7fE922fD2d55E4f631d962dE19c'
 
-async function fetchShMonad(_nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
+async function fetchShMonad(_nativeApyMap: Map<string, number>, monPrice = 0): Promise<AprEntry | null> {
   // floppy-backup API is blocked server-side (403) — use on-chain ERC4626 pricePerShare delta
   // Confirmed working: convertToAssets(1e18) responds, 7d APR ~11-15%
   try {
     const currentBlock = await getBlockNumber()
-    const apr = await getVaultApr(SHMON_ADDRESS, currentBlock)
+    // Parallel: APR from pricePerShare delta + TVL from totalSupply × monPrice
+    const [apr, tsRes] = await Promise.all([
+      getVaultApr(SHMON_ADDRESS, currentBlock),
+      rpcBatch([ethCall(SHMON_ADDRESS, '0x18160ddd', 999)]),
+    ])
     if (apr <= 0) return null
+    const tsRaw = (tsRes as any[])[0]?.result ?? '0x'
+    const supply = tsRaw && tsRaw !== '0x' ? Number(BigInt(tsRaw)) / 1e18 : 0
+    const tvl = supply * monPrice
     return {
       protocol: 'shMonad', logo: '⚡', url: 'https://shmonad.xyz',
       tokens: ['shMON'], label: 'Holistic Staked MON',
-      apr, tvl: 0, type: 'vault', isStable: false,
+      apr, tvl, type: 'vault', isStable: false,
     }
   } catch { return null }
 }
 
 // ─── KINTSU, MAGMA, shMONAD — LST staking vaults (parallel) ─────────────────
-async function fetchLSTVaults(nativeApyMap: Map<string, number>): Promise<AprEntry[]> {
+async function fetchLSTVaults(
+  nativeApyMap: Map<string, number>,
+  monPrice: number,
+  llamaTvls: Map<string, number>
+): Promise<AprEntry[]> {
+  const kintsuTvl = llamaTvls.get('kintsu') ?? 0
   const [kintsuR, magmaR, shmonadR] = await Promise.allSettled([
-    fetchKintsusMON(nativeApyMap),
+    fetchKintsusMON(nativeApyMap, kintsuTvl),
     fetchMagmaOnchain(),
-    fetchShMonad(nativeApyMap),
+    fetchShMonad(nativeApyMap, monPrice),
   ])
 
   const entries: AprEntry[] = []
@@ -957,10 +994,11 @@ async function fetchLSTVaults(nativeApyMap: Map<string, number>): Promise<AprEnt
   const mData = magmaR.status === 'fulfilled' ? magmaR.value : null
   if (mData) {
     const apr = Number(mData?.apr ?? 0)
+    const tvl = (mData?.tvlInMON ?? 0) * monPrice
     if (apr > 0) entries.push({
       protocol: 'Magma', logo: '🐲', url: 'https://magmastaking.xyz',
       tokens: ['gMON'], label: 'MEV-Optimized Staked MON',
-      apr, tvl: 0, type: 'vault', isStable: false,
+      apr, tvl, type: 'vault', isStable: false,
     })
   }
 
@@ -1053,7 +1091,7 @@ const CURVANCE_NATIVE_MARKETS: Array<{ symbol: string; label: string; isStable: 
   { symbol: 'syzUSD', label: 'Curvance syzUSD/AUSD',  isStable: true  },
 ]
 
-async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntry[]> {
+async function fetchCurvance(nativeApyMap: Map<string, number>, llamaTvls: Map<string, number>): Promise<AprEntry[]> {
   try {
     const res = await fetch(
       'https://api.merkl.xyz/v4/opportunities?items=100&mainProtocolId=curvance&action=LEND&chainId=143',
@@ -1107,6 +1145,8 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
     }
 
     // Synthetic entries for LST markets not covered by Merkl incentives
+    // TVL: DeFiLlama protocol total (best available without per-market data)
+    const curvanceTvl = llamaTvls.get('curvance') ?? 0
     for (const market of CURVANCE_NATIVE_MARKETS) {
       if (merklSymbols.has(market.symbol)) continue
       const nativeApy = nativeApyMap.get(market.symbol.toUpperCase()) ?? 0
@@ -1119,7 +1159,7 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
         tokens: [market.symbol],
         label: market.label,
         apr: nativeApr,
-        tvl: 0,
+        tvl: curvanceTvl,
         type: 'lend',
         isStable: market.isStable,
       })
@@ -1187,25 +1227,29 @@ async function fetchMidas(): Promise<AprEntry[]> {
 
 // ─── Fetch all data (used by cache) ──────────────────────────────────────────
 async function fetchAllData() {
-  // Fetch native APY map first (fast, ~100ms) — shared by LST vaults + Curvance
-  const nativeApyMap = await fetchFloppyNativeApy()
+  // Fetch shared data first — native APY, MON price, DeFiLlama TVLs (parallel)
+  const [nativeApyMap, monPrice, llamaTvls] = await Promise.all([
+    fetchFloppyNativeApy(),
+    fetchMonPrice(),
+    fetchDeFiLlamaTvls(),
+  ])
 
   const [morphoR, neverlandR, eulerR, curveR, lagoonR, kuruR, kuruPoolsR, lstR, uniR, pancakeR, kintsuVaultR, upshiftR, gearboxR, curvanceR, midasR] =
     await Promise.allSettled([
       fetchMorpho(),
-      fetchNeverland(),
+      fetchNeverland(monPrice),
       fetchEulerV2(),
       fetchCurve(),
       fetchLagoon(),
       fetchKuru(),
       fetchKuruPools(),
-      fetchLSTVaults(nativeApyMap),
+      fetchLSTVaults(nativeApyMap, monPrice, llamaTvls),
       fetchUniswap(),
       fetchPancakeswap(),
-      fetchKintsuVault(),
+      fetchKintsuVault(llamaTvls.get('kintsu') ?? 0),
       fetchUpshift(),
       fetchGearbox(),
-      fetchCurvance(nativeApyMap),
+      fetchCurvance(nativeApyMap, llamaTvls),
       fetchMidas(),
     ])
 
