@@ -11,6 +11,7 @@ export interface AprEntry {
   tokens:     string[]      // symbols involved
   label:      string        // human-readable name
   apr:        number        // annual percentage rate (e.g. 8.5 = 8.5%)
+  tvl:        number        // total value locked in USD
   type:       'pool' | 'vault' | 'lend'
   isStable:   boolean       // true when ALL tokens are stablecoins
 }
@@ -113,7 +114,7 @@ async function fetchMorpho(): Promise<AprEntry[]> {
       out.push({
         protocol: 'Morpho', logo: '🦋', url,
         tokens, label: collSym ? `${collSym} / ${loanSym}` : loanSym,
-        apr: supplyApr, type: 'lend', isStable: allStable(tokens),
+        apr: supplyApr, tvl: supplyUsd, type: 'lend', isStable: allStable(tokens),
       })
     }
     for (const v of data?.data?.vaults?.items ?? []) {
@@ -129,7 +130,7 @@ async function fetchMorpho(): Promise<AprEntry[]> {
       out.push({
         protocol: 'Morpho', logo: '🦋', url,
         tokens: [sym], label: v.name ?? v.symbol ?? sym,
-        apr: netApr, type: 'vault', isStable: isStable(sym),
+        apr: netApr, tvl: totalUsd, type: 'vault', isStable: isStable(sym),
       })
     }
     return out
@@ -165,7 +166,7 @@ async function fetchNeverland(): Promise<AprEntry[]> {
       out.push({
         protocol: 'Neverland', logo: '🌙', url: 'https://app.neverland.money',
         tokens: [asset.symbol], label: asset.symbol,
-        apr: supplyApr, type: 'lend', isStable: isStable(asset.symbol),
+        apr: supplyApr, tvl: 0, type: 'lend', isStable: isStable(asset.symbol),
       })
     })
     return out
@@ -212,7 +213,7 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
       const entry: AprEntry = {
         protocol: 'Euler V2', logo: '📐', url,
         tokens: [sym], label: v.vaultName ?? sym,
-        apr: supApr, type: 'lend', isStable: isStable(sym),
+        apr: supApr, tvl: totalUsd, type: 'lend', isStable: isStable(sym),
       }
 
       if (!existing || totalUsd > existing.tvl) {
@@ -290,6 +291,7 @@ async function fetchCurve(): Promise<AprEntry[]> {
         url,
         tokens, label,
         apr: Math.min(apr, 500),
+        tvl,
         type: 'pool' as const,
         isStable: allStable(tokens),
       })
@@ -349,6 +351,7 @@ async function fetchUpshift(): Promise<AprEntry[]> {
         tokens,
         label:    v.name ?? tokens.join(' / '),
         apr,
+        tvl:      Number(v.latest_reported_tvl ?? 0),
         type:     'vault',
         isStable: stable,
       })
@@ -405,6 +408,7 @@ async function fetchLagoon(): Promise<AprEntry[]> {
         tokens: [token],
         label: `${vault.name} (${curator})`,
         apr,
+        tvl: Number(vault.tvl ?? 0),
         type: 'vault',
         isStable: ['USDC', 'USDT', 'AUSD', 'DAI', 'USDT0'].includes(token),
       })
@@ -413,10 +417,13 @@ async function fetchLagoon(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── KURU — vault pool APRs via Merkl ────────────────────────────────────────
+// ─── KURU — vault pool APRs ───────────────────────────────────────────────────
 // Source: https://api.kuru.io/api/v3/vaults
 // Returns { data: { data: [{ vaultAddress, apy, tvl, quoteToken, baseToken }] } }
-// apy is decimal (0..1), e.g. 0.74 = 74% APY — converted to APR via apyToApr()
+// apy arrives as a STRING decimal (e.g. "0.74" = 74% APY) — use parseFloat explicitly.
+// tvl is also a string (e.g. "920599.01") — parse with Number().
+// APY → APR via daily compounding: apyToApr(apyDecimal) * 100
+// Debug confirmed: MON/AUSD ~55.6% APR, MON/USDC ~37.1% APR
 async function fetchKuru(): Promise<AprEntry[]> {
   try {
     const res = await fetch(
@@ -438,16 +445,18 @@ async function fetchKuru(): Promise<AprEntry[]> {
     const entries: AprEntry[] = []
 
     for (const vault of vaults) {
-      const apyDecimal = Number(vault.apy ?? 0)
-      if (apyDecimal <= 0) continue
+      // apy comes as a string from the API — parse explicitly with parseFloat
+      const apyDecimal = parseFloat(String(vault.apy ?? '0'))
+      if (!isFinite(apyDecimal) || apyDecimal <= 0) continue
 
-      const apr = apyToApr(apyDecimal) * 100   // convert APY decimal → APR %
+      const apr = apyToApr(apyDecimal) * 100   // APY decimal → APR %
+      const tvl = Number(vault.tvl ?? 0)
 
-      const baseSymbol = String(vault.baseToken?.ticker ?? vault.baseToken?.name ?? 'MON')
+      const baseSymbol  = String(vault.baseToken?.ticker  ?? vault.baseToken?.name  ?? 'MON')
       const quoteSymbol = String(vault.quoteToken?.ticker ?? vault.quoteToken?.name ?? '')
-      const tokens = [baseSymbol, quoteSymbol].filter(Boolean)
-      const pairLabel = tokens.join(' / ')
-      const vaultUrl = `https://www.kuru.io/vaults/${vault.vaultAddress ?? ''}`
+      const tokens      = [baseSymbol, quoteSymbol].filter(Boolean)
+      const pairLabel   = tokens.join(' / ')
+      const vaultUrl    = `https://www.kuru.io/vaults/${vault.vaultAddress ?? ''}`
 
       entries.push({
         protocol: 'Kuru',
@@ -456,6 +465,7 @@ async function fetchKuru(): Promise<AprEntry[]> {
         tokens,
         label: `Kuru ${pairLabel}`,
         apr,
+        tvl,
         type: 'pool',
         isStable: allStable(tokens),
       })
@@ -464,149 +474,189 @@ async function fetchKuru(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── CURVANCE — lending markets via Merkl API + Floppy native APY ────────────
-// Merkl covers incentive rewards (AUSD, WMON, WETH, YZM markets).
-// Curvance also hosts LST markets (sMON, shMON, gMON, syzUSD) whose APR comes
-// entirely from the underlying vault's native APY (tracked by Floppy).
-// These LST markets have NO Merkl entry, so we synthesize entries directly
-// from the nativeApyMap for any token Curvance supports that Merkl doesn't cover.
-//
-// Curvance LST markets on Monad mainnet (from app.curvance.com source):
-//   sMON  → shMON|WMON, sMON|WMON, gMON|WMON markets
-//   USDC  → WMON/USDC market (Floppy: USDC native yield)
-//   syzUSD → syzUSD/AUSD market
-//   shMON → shMON/WMON market
-const CURVANCE_NATIVE_MARKETS: Array<{ symbol: string; label: string; isStable: boolean }> = [
-  { symbol: 'sMON',   label: 'Curvance sMON/WMON',   isStable: false },
-  { symbol: 'shMON',  label: 'Curvance shMON/WMON',  isStable: false },
-  { symbol: 'gMON',   label: 'Curvance gMON/WMON',   isStable: false },
-  { symbol: 'syzUSD', label: 'Curvance syzUSD/AUSD',  isStable: true  },
-]
-
-async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntry[]> {
+// ─── MERKL — fetch reward APRs for Monad pools ──────────────────────────────
+async function fetchMerklRewardMap(): Promise<Map<string, number>> {
+  const map = new Map<string, number>()
   try {
     const res = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?items=100&mainProtocolId=curvance&action=LEND&chainId=143',
-      {
-        signal: AbortSignal.timeout(10_000),
-        cache: 'no-store',
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        },
-      }
+      'https://api.merkl.xyz/v4/opportunities?chainId=143&action=POOL&status=LIVE&items=100',
+      { signal: AbortSignal.timeout(12_000), cache: 'no-store' },
     )
-    if (!res.ok) return []
-    const raw = await res.json()
-    const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
-    const entries: AprEntry[] = []
-    const merklSymbols = new Set<string>()
+    if (!res.ok) return map
+    const opps: any[] = await res.json()
+    for (const o of opps) {
+      const addr = (o.identifier ?? '').toLowerCase()
+      const apr  = Number(o.apr ?? 0)
+      if (addr && apr > 0) {
+        map.set(addr, (map.get(addr) ?? 0) + apr)
+      }
+    }
+  } catch { /* ignore */ }
+  return map
+}
 
-    for (const opp of data) {
-      if (opp.status !== 'LIVE') continue
-      const apr = Number(opp.apr ?? 0)
-      if (apr <= 0) continue
-
-      // Curvance wrappers start with 'c' + letter: cAUSD, cWMON, cearnAUSD, cYZM, cUSDC
-      const tokens: any[] = opp.tokens ?? []
-      const underlying =
-        tokens.find((t: any) => !/^c[A-Za-z]/.test(t.symbol ?? '')) ??
-        tokens.find((t: any) => t.verified === true) ??
-        tokens[0]
-      const tokenSymbol = underlying?.symbol ?? 'TOKEN'
-      merklSymbols.add(tokenSymbol)
-
-      const isStableToken = STABLECOINS.has(tokenSymbol)
-      const marketMatch = (opp.name as string)?.match(/Curvance (.+?) market/)
-      const label = marketMatch ? `Curvance ${marketMatch[1]}` : (opp.name ?? `Curvance ${tokenSymbol}`)
-
-      const nativeApy = nativeApyMap.get(tokenSymbol.toUpperCase()) ?? 0
-      const nativeApr = nativeApy > 0 ? apyToApr(nativeApy / 100) * 100 : 0
-
-      entries.push({
-        protocol: 'Curvance',
-        logo: '🔵',
-        url: opp.depositUrl ?? 'https://app.curvance.com',
-        tokens: [tokenSymbol],
-        label,
-        apr: apr + nativeApr,
-        type: 'lend',
-        isStable: isStableToken,
+// ─── PANCAKESWAP V3 — pools via explorer API + Merkl rewards ─────────────────
+async function fetchPancakeswap(): Promise<AprEntry[]> {
+  try {
+    const [poolsRes, merklMap] = await Promise.all([
+      fetch(
+        'https://explorer.pancakeswap.com/api/cached/pools/list?protocols=v3&chains=monad&orderBy=tvlUSD',
+        { signal: AbortSignal.timeout(15_000), cache: 'no-store' },
+      ),
+      fetchMerklRewardMap(),
+    ])
+    if (!poolsRes.ok) return []
+    const data = await poolsRes.json()
+    const rows: any[] = data?.rows ?? data?.data?.rows ?? (Array.isArray(data) ? data : [])
+    const out: AprEntry[] = []
+    for (const p of rows) {
+      const tvl    = Number(p.tvlUSD ?? 0)
+      const feeApr = Number(p.apr24h ?? 0) * 100
+      if (tvl < 100) continue
+      const poolAddr = (p.id ?? '').toLowerCase()
+      const rewardApr = merklMap.get(poolAddr) ?? 0
+      const apr = feeApr + rewardApr
+      if (apr < 0.01) continue
+      const t0 = p.token0?.symbol ?? '?'
+      const t1 = p.token1?.symbol ?? '?'
+      const tokens = [t0, t1]
+      const fee = Number(p.feeTier ?? 0)
+      const feePct = fee / 10000
+      const feeLabel = feePct >= 0.01 ? `${feePct}%` : `${fee / 100}bp`
+      out.push({
+        protocol: 'PancakeSwap V3', logo: '🥞',
+        url: `https://pancakeswap.finance/liquidity/pool/monad/${p.id ?? ''}`,
+        tokens, label: `${t0}/${t1} ${feeLabel}`,
+        apr, tvl, type: 'pool', isStable: allStable(tokens),
       })
     }
-
-    // Synthetic entries for LST markets not covered by Merkl incentives
-    // These earn purely from the native vault APY (Floppy source)
-    for (const market of CURVANCE_NATIVE_MARKETS) {
-      if (merklSymbols.has(market.symbol)) continue  // already included above
-      const nativeApy = nativeApyMap.get(market.symbol.toUpperCase()) ?? 0
-      if (nativeApy <= 0) continue
-      const nativeApr = apyToApr(nativeApy / 100) * 100
-      entries.push({
-        protocol: 'Curvance',
-        logo: '🔵',
-        url: 'https://app.curvance.com',
-        tokens: [market.symbol],
-        label: market.label,
-        apr: nativeApr,
-        type: 'lend',
-        isStable: market.isStable,
-      })
-    }
-
-    return entries
+    return out
   } catch { return [] }
 }
 
-// ─── MIDAS — tokenized RWAs via live API ──────────────────────────────────────
-// Source: https://api-prod.midas.app/api/marketplace/products
-// Requires browser-like headers — endpoint checks User-Agent server-side.
-// apy.value7d is a decimal (0.1386 = 13.86% APY) — convert to APR with daily compounding.
-// Filter: tvl.usd >= 100_000 and at least one non-zero APY value.
-async function fetchMidas(): Promise<AprEntry[]> {
+// ─── KINTSU — superMON vault ─────────────────────────────────────────────────
+// superMON (0x792C) é gerido pela Kintsu mas listado na Upshift proxy API.
+// historical_apy.7 = APY decimal (ex: 0.1077 = 10.77%). Usar 7d.
+// Nota: Upshift pode retornar 429 — nesse caso retorna [].
+
+const KINTSU_VAULT_ADDRESS = '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'
+
+async function fetchKintsuVault(): Promise<AprEntry[]> {
   try {
-    const res = await fetch('https://api-prod.midas.app/api/marketplace/products', {
-      signal: AbortSignal.timeout(10_000),
-      cache: 'no-store',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'Origin': 'https://app.midas.app',
-        'Referer': 'https://app.midas.app/',
-      },
+    const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
+      signal: AbortSignal.timeout(10_000), cache: 'no-store',
     })
     if (!res.ok) return []
     const data = await res.json()
-    const products: any[] = data?.products ?? []
-    if (!Array.isArray(products) || products.length === 0) return []
+    const vaults: any[] = data?.data ?? []
+    const vault = vaults.find(
+      (v: any) => (v.address ?? '').toLowerCase() === KINTSU_VAULT_ADDRESS.toLowerCase()
+    )
+    if (!vault) return []
+
+    const hist = vault.historical_apy ?? {}
+    const apyDecimal = hist['7'] ?? hist['30'] ?? null
+    if (typeof apyDecimal !== 'number' || apyDecimal <= 0) return []
+
+    const apr = Math.min(365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100, 200)
+    return [buildKintsuEntry(apr)]
+  } catch { return [] }
+}
+
+function buildKintsuEntry(apr: number): AprEntry {
+  return {
+    protocol: 'Kintsu',
+    logo: '🔷',
+    url: 'https://kintsu.xyz/vaults',
+    tokens: ['WMON'],
+    label: 'superMON Vault',
+    apr,
+    tvl: 0,
+    type: 'vault',
+    isStable: false,
+  }
+}
+
+// ─── GEARBOX V3 — lending pools ──────────────────────────────────────────────
+// Source: static JSON updated by GearBox with each deployment.
+// supplyRate is already annualised in RAY (1e27). APR = supplyRate / 1e27 * 100.
+
+const GEARBOX_STATIC_URL   = 'https://state-cache.gearbox.foundation/Monad.json'
+const GEARBOX_APY_URL      = 'https://state-cache.gearbox.foundation/apy-server/latest.json'
+
+const GEARBOX_POOL_LIST = [
+  { addr: '0x09cA6b76276eC0682adb896418b99CB7E44a58A0', token: 'WMON', isStable: false },
+  { addr: '0x6B343F7B797f1488AA48C49d540690F2b2c89751', token: 'USDC', isStable: true  },
+  { addr: '0xc4173359087CE643235420b7bC610d9B0CF2B82D', token: 'AUSD', isStable: true  },
+  { addr: '0x164A35F31e4E0F6c45D500962a6978D2cbD5a16b', token: 'USDT', isStable: true  },
+  { addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689', token: 'WMON', isStable: false },
+]
+
+// Returns a map of pool address (lowercase) → total extraAPY from incentive programs
+async function fetchGearboxExtraApy(): Promise<Map<string, number>> {
+  const map = new Map<string, number>()
+  try {
+    const res = await fetch(GEARBOX_APY_URL, {
+      signal: AbortSignal.timeout(8_000),
+      cache: 'no-store',
+    })
+    if (!res.ok) return map
+    const data = await res.json()
+    const pools: any[] = data?.chains?.['143']?.pools?.data ?? []
+    const now = Math.floor(Date.now() / 1000)
+
+    for (const entry of pools) {
+      const addr = (entry?.pool ?? '').toLowerCase()
+      const extraAPY: any[] = entry?.rewards?.extraAPY ?? []
+      const total = extraAPY
+        .filter((e: any) => !e.endTimestamp || e.endTimestamp > now)
+        .reduce((sum: number, e: any) => sum + (Number(e.apy) || 0), 0)
+      if (total > 0) map.set(addr, total)
+    }
+  } catch { /* ignore, just no extra APY */ }
+  return map
+}
+
+async function fetchGearbox(): Promise<AprEntry[]> {
+  try {
+    const [poolsRes, extraApyMap] = await Promise.all([
+      fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
+      fetchGearboxExtraApy(),
+    ])
+    if (!poolsRes.ok) return []
+    const data = await poolsRes.json()
+    const markets: any[] = data?.markets ?? []
 
     const out: AprEntry[] = []
-    for (const p of products) {
-      const tvlUsd = Number(p.tvl?.usd ?? 0)
-      const apy7d  = Number(p.apy?.value7d  ?? 0)
-      const apy30d = Number(p.apy?.value30d ?? 0)
-      const apy    = apy7d > 0 ? apy7d : apy30d   // prefer 7d, fall back to 30d
+    for (const m of markets) {
+      const pool = m?.pool
+      if (!pool || pool.isPaused) continue
 
-      if (tvlUsd < 100_000) continue
-      if (apy <= 0) continue
-      const networks: string[] = Array.isArray(p.networks) ? p.networks : []
-      if (!networks.includes('evm:monad')) continue   // only show vaults deployed on Monad
+      const addr: string = pool?.baseParams?.addr ?? ''
+      const meta = GEARBOX_POOL_LIST.find(p => p.addr.toLowerCase() === addr.toLowerCase())
+      if (!meta) continue
 
-      const apr = Math.min(apyToApr(apy) * 100, 200)
-      if (apr < 0.01) continue
+      const supplyRayStr: string = pool?.supplyRate?.__value ?? '0'
+      const supplyRay = BigInt(supplyRayStr)
+      if (supplyRay === 0n) continue
 
-      const symbol = String(p.symbol ?? '')
-      const name   = String(p.name   ?? symbol)
+      // supplyRate is annualised in RAY (1e27)
+      const baseApr = Number(supplyRay) / 1e27 * 100
+      if (baseApr < 0.01 || baseApr > 500) continue
+
+      const extraApr = extraApyMap.get(addr.toLowerCase()) ?? 0
+      const apr = baseApr + extraApr
 
       out.push({
-        protocol: 'Midas',
-        logo: '🏛️',
-        url: 'https://app.midas.app',
-        tokens: [symbol],
-        label: name,
+        protocol: 'GearBox V3',
+        logo: '⚙️',
+        url: 'https://app.gearbox.fi/pools?chainId=143',
+        tokens: [meta.token],
+        label: pool.name ?? meta.token,
         apr,
-        type: 'vault',
-        isStable: isStable(symbol),
+        tvl: Number(pool.expectedLiquidity?.__value ?? 0) / 1e18,
+        type: 'lend',
+        isStable: meta.isStable,
       })
     }
     return out
@@ -771,6 +821,7 @@ const KINTSU_LST_QUERY = `{
 
 async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEntry | null> {
   // Primary: kintsu.xyz/api/graphql — returns 500 server-side, kept for future recovery.
+  // Fallback: Floppy SMON APY from nativeApyMap (confirmed working).
   try {
     const res = await fetch(KINTSU_LST_GQL, {
       method: 'POST',
@@ -779,60 +830,37 @@ async function fetchKintsusMON(nativeApyMap: Map<string, number>): Promise<AprEn
       signal: AbortSignal.timeout(8_000),
       cache: 'no-store',
     })
-    if (!res.ok) throw new Error(`GraphQL ${res.status}`)
-    const json = await res.json()
-    const rows: any[] = json?.data?.Protocol_LST_Analytics_Day ?? []
-    if (rows.length < 8) throw new Error('insufficient rows')
-    const rewardsDelta = Number(rows[0].totalRewards) - Number(rows[7].totalRewards)
-    const tvlAvg = rows.slice(0, 7).reduce((s: number, r: any) => s + Number(r.totalPooledStaked), 0) / 7
-    if (rewardsDelta <= 0 || tvlAvg <= 0) throw new Error('bad data')
-    const apr = Math.min((rewardsDelta / tvlAvg) / 7 * 365 * 100, 100)
-    if (apr < 0.01) throw new Error('apr too low')
-    return {
-      protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
-      tokens: ['sMON'], label: 'Staked MON',
-      apr, type: 'vault', isStable: false,
+    if (res.ok) {
+      const data = await res.json()
+      const rows: any[] = data?.data?.Protocol_LST_Analytics_Day ?? []
+      if (rows.length >= 2) {
+        const newest = rows[0]
+        const oldest = rows[Math.min(6, rows.length - 1)]
+        const rewardDelta = Number(newest.totalRewards) - Number(oldest.totalRewards)
+        const avgTvl = (Number(newest.totalPooledStaked) + Number(oldest.totalPooledStaked)) / 2
+        const days = rows.length - 1
+        if (avgTvl > 0 && rewardDelta > 0) {
+          const apr = Math.min((rewardDelta / avgTvl / days) * 365 * 100, 100)
+          if (apr > 0) return {
+            protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
+            tokens: ['sMON'], label: 'Staked MON',
+            apr, tvl: 0, type: 'vault', isStable: false,
+          }
+        }
+      }
     }
-  } catch { /* fall through */ }
+  } catch { /* fall through to Floppy */ }
 
-  // Fallback 1: nativeApyMap populated by fetchFloppyNativeApy() (may be empty in production)
-  const smonApyFromMap = nativeApyMap.get('SMON') ?? 0
-  if (smonApyFromMap > 0) {
-    const apr = Math.min(apyToApr(smonApyFromMap / 100) * 100, 100)
-    if (apr >= 0.01) return {
-      protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
-      tokens: ['sMON'], label: 'Staked MON',
-      apr, type: 'vault', isStable: false,
-    }
+  // Fallback: Floppy SMON APY
+  const smonApy = nativeApyMap.get('SMON') ?? 0
+  if (smonApy <= 0) return null
+  const apr = Math.min(apyToApr(smonApy / 100) * 100, 100)
+  if (apr < 0.01) return null
+  return {
+    protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
+    tokens: ['sMON'], label: 'Staked MON',
+    apr, tvl: 0, type: 'vault', isStable: false,
   }
-
-  // Fallback 2: fetch Floppy directly with browser headers (reliable in all environments)
-  try {
-    const res = await fetch('https://api.floppy-backup.com/v1/monad/native_apy', {
-      signal: AbortSignal.timeout(8_000),
-      cache: 'no-store',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'Origin': 'https://app.floppy.fi',
-        'Referer': 'https://app.floppy.fi/',
-      },
-    })
-    if (!res.ok) return null
-    const data = await res.json()
-    const entry = (data.native_apy ?? []).find((e: any) =>
-      String(e.symbol ?? '').toUpperCase() === 'SMON'
-    )
-    const smonApy = Number(entry?.apy ?? 0)
-    if (smonApy <= 0) return null
-    const apr = Math.min(apyToApr(smonApy / 100) * 100, 100)
-    if (apr < 0.01) return null
-    return {
-      protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
-      tokens: ['sMON'], label: 'Staked MON',
-      apr, type: 'vault', isStable: false,
-    }
-  } catch { return null }
 }
 
 // ─── shMONAD — on-chain ERC4626 pricePerShare delta ─────────────────────────
@@ -850,7 +878,7 @@ async function fetchShMonad(_nativeApyMap: Map<string, number>): Promise<AprEntr
     return {
       protocol: 'shMonad', logo: '⚡', url: 'https://shmonad.xyz',
       tokens: ['shMON'], label: 'Holistic Staked MON',
-      apr, type: 'vault', isStable: false,
+      apr, tvl: 0, type: 'vault', isStable: false,
     }
   } catch { return null }
 }
@@ -874,7 +902,7 @@ async function fetchLSTVaults(nativeApyMap: Map<string, number>): Promise<AprEnt
     if (apr > 0) entries.push({
       protocol: 'Magma', logo: '🐲', url: 'https://magmastaking.xyz',
       tokens: ['gMON'], label: 'MEV-Optimized Staked MON',
-      apr, type: 'vault', isStable: false,
+      apr, tvl: 0, type: 'vault', isStable: false,
     })
   }
 
@@ -904,7 +932,7 @@ function parseUniPools(pools: any[], version: string): AprEntry[] {
       protocol: `Uniswap ${version}`, logo: '🦄',
       url: `https://app.uniswap.org/explore/pools/monad/${poolRef}`,
       tokens, label: `${t0}/${t1} ${feeLabel}`,
-      apr, type: 'pool', isStable: allStable(tokens),
+      apr, tvl, type: 'pool', isStable: allStable(tokens),
     })
   }
   return out
@@ -948,187 +976,151 @@ async function fetchUniswap(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── MERKL — fetch reward APRs for Monad pools ──────────────────────────────
-async function fetchMerklRewardMap(): Promise<Map<string, number>> {
-  const map = new Map<string, number>()
+// ─── CURVANCE — lending markets via Merkl API + Floppy native APY ────────────
+// Merkl covers incentive rewards (AUSD, WMON, WETH, YZM markets).
+// Curvance also hosts LST markets (sMON, shMON, gMON, syzUSD) whose APR comes
+// entirely from the underlying vault's native APY (tracked by Floppy).
+// These LST markets have NO Merkl entry, so we synthesize entries directly
+// from the nativeApyMap for any token Curvance supports that Merkl doesn't cover.
+//
+// Curvance LST markets on Monad mainnet (from app.curvance.com source):
+//   sMON  → shMON|WMON, sMON|WMON, gMON|WMON markets
+//   USDC  → WMON/USDC market (Floppy: USDC native yield)
+//   syzUSD → syzUSD/AUSD market
+//   shMON → shMON/WMON market
+const CURVANCE_NATIVE_MARKETS: Array<{ symbol: string; label: string; isStable: boolean }> = [
+  { symbol: 'sMON',   label: 'Curvance sMON/WMON',   isStable: false },
+  { symbol: 'shMON',  label: 'Curvance shMON/WMON',  isStable: false },
+  { symbol: 'gMON',   label: 'Curvance gMON/WMON',   isStable: false },
+  { symbol: 'syzUSD', label: 'Curvance syzUSD/AUSD',  isStable: true  },
+]
+
+async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntry[]> {
   try {
     const res = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?chainId=143&action=POOL&status=LIVE&items=100',
-      { signal: AbortSignal.timeout(12_000), cache: 'no-store' },
-    )
-    if (!res.ok) return map
-    const opps: any[] = await res.json()
-    for (const o of opps) {
-      const addr = (o.identifier ?? '').toLowerCase()
-      const apr  = Number(o.apr ?? 0)
-      if (addr && apr > 0) {
-        map.set(addr, (map.get(addr) ?? 0) + apr)
+      'https://api.merkl.xyz/v4/opportunities?items=100&mainProtocolId=curvance&action=LEND&chainId=143',
+      {
+        signal: AbortSignal.timeout(10_000),
+        cache: 'no-store',
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        },
       }
-    }
-  } catch { /* ignore */ }
-  return map
-}
+    )
+    if (!res.ok) return []
+    const raw = await res.json()
+    const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
+    const entries: AprEntry[] = []
+    const merklSymbols = new Set<string>()
 
-// ─── PANCAKESWAP V3 — pools via explorer API + Merkl rewards ─────────────────
-async function fetchPancakeswap(): Promise<AprEntry[]> {
-  try {
-    const [poolsRes, merklMap] = await Promise.all([
-      fetch(
-        'https://explorer.pancakeswap.com/api/cached/pools/list?protocols=v3&chains=monad&orderBy=tvlUSD',
-        { signal: AbortSignal.timeout(15_000), cache: 'no-store' },
-      ),
-      fetchMerklRewardMap(),
-    ])
-    if (!poolsRes.ok) return []
-    const data = await poolsRes.json()
-    const rows: any[] = data?.rows ?? data?.data?.rows ?? (Array.isArray(data) ? data : [])
-    const out: AprEntry[] = []
-    for (const p of rows) {
-      const tvl    = Number(p.tvlUSD ?? 0)
-      const feeApr = Number(p.apr24h ?? 0) * 100
-      if (tvl < 100) continue
-      const poolAddr = (p.id ?? '').toLowerCase()
-      const rewardApr = merklMap.get(poolAddr) ?? 0
-      const apr = feeApr + rewardApr
-      if (apr < 0.01) continue
-      const t0 = p.token0?.symbol ?? '?'
-      const t1 = p.token1?.symbol ?? '?'
-      const tokens = [t0, t1]
-      const fee = Number(p.feeTier ?? 0)
-      const feePct = fee / 10000
-      const feeLabel = feePct >= 0.01 ? `${feePct}%` : `${fee / 100}bp`
-      out.push({
-        protocol: 'PancakeSwap V3', logo: '🥞',
-        url: `https://pancakeswap.finance/liquidity/pool/monad/${p.id ?? ''}`,
-        tokens, label: `${t0}/${t1} ${feeLabel}`,
-        apr, type: 'pool', isStable: allStable(tokens),
+    for (const opp of data) {
+      if (opp.status !== 'LIVE') continue
+      const apr = Number(opp.apr ?? 0)
+      if (apr <= 0) continue
+
+      // Curvance wrappers start with 'c' + letter: cAUSD, cWMON, cearnAUSD, cYZM, cUSDC
+      const tokens: any[] = opp.tokens ?? []
+      const underlying =
+        tokens.find((t: any) => !/^c[A-Za-z]/.test(t.symbol ?? '')) ??
+        tokens.find((t: any) => t.verified === true) ??
+        tokens[0]
+      const tokenSymbol = underlying?.symbol ?? 'TOKEN'
+      merklSymbols.add(tokenSymbol)
+
+      const isStableToken = STABLECOINS.has(tokenSymbol)
+      const marketMatch = (opp.name as string)?.match(/Curvance (.+?) market/)
+      const label = marketMatch ? `Curvance ${marketMatch[1]}` : (opp.name ?? `Curvance ${tokenSymbol}`)
+
+      const nativeApy = nativeApyMap.get(tokenSymbol.toUpperCase()) ?? 0
+      const nativeApr = nativeApy > 0 ? apyToApr(nativeApy / 100) * 100 : 0
+
+      entries.push({
+        protocol: 'Curvance',
+        logo: '🔵',
+        url: opp.depositUrl ?? 'https://app.curvance.com',
+        tokens: [tokenSymbol],
+        label,
+        apr: apr + nativeApr,
+        tvl: Number(opp.tvl ?? 0),
+        type: 'lend',
+        isStable: isStableToken,
       })
     }
-    return out
+
+    // Synthetic entries for LST markets not covered by Merkl incentives
+    for (const market of CURVANCE_NATIVE_MARKETS) {
+      if (merklSymbols.has(market.symbol)) continue
+      const nativeApy = nativeApyMap.get(market.symbol.toUpperCase()) ?? 0
+      if (nativeApy <= 0) continue
+      const nativeApr = apyToApr(nativeApy / 100) * 100
+      entries.push({
+        protocol: 'Curvance',
+        logo: '🔵',
+        url: 'https://app.curvance.com',
+        tokens: [market.symbol],
+        label: market.label,
+        apr: nativeApr,
+        tvl: 0,
+        type: 'lend',
+        isStable: market.isStable,
+      })
+    }
+
+    return entries
   } catch { return [] }
 }
 
-// ─── KINTSU — superMON vault ─────────────────────────────────────────────────
-// superMON (0x792C) é gerido pela Kintsu mas listado na Upshift proxy API.
-// historical_apy.7 = APY decimal (ex: 0.1077 = 10.77%). Usar 7d.
-// Nota: Upshift pode retornar 429 — nesse caso retorna [].
-
-const KINTSU_VAULT_ADDRESS = '0x792C7c5fB5C996E588b9F4A5FB201C79974e267C'
-
-async function fetchKintsuVault(): Promise<AprEntry[]> {
+// ─── MIDAS — tokenized RWAs via live API ──────────────────────────────────────
+// Source: https://api-prod.midas.app/api/marketplace/products
+// Requires browser-like headers — endpoint checks User-Agent server-side.
+// apy.value7d is a decimal (0.1386 = 13.86% APY) — convert to APR with daily compounding.
+// Filter: tvl.usd >= 100_000 and at least one non-zero APY value.
+async function fetchMidas(): Promise<AprEntry[]> {
   try {
-    const res = await fetch('https://app.upshift.finance/api/proxy/vaults', {
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
+    const res = await fetch('https://api-prod.midas.app/api/marketplace/products', {
+      signal: AbortSignal.timeout(10_000),
+      cache: 'no-store',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Origin': 'https://app.midas.app',
+        'Referer': 'https://app.midas.app/',
+      },
     })
     if (!res.ok) return []
     const data = await res.json()
-    const vaults: any[] = data?.data ?? []
-    const vault = vaults.find(
-      (v: any) => (v.address ?? '').toLowerCase() === KINTSU_VAULT_ADDRESS.toLowerCase()
-    )
-    if (!vault) return []
-
-    const hist = vault.historical_apy ?? {}
-    const apyDecimal = hist['7'] ?? hist['30'] ?? null
-    if (typeof apyDecimal !== 'number' || apyDecimal <= 0) return []
-
-    const apr = Math.min(365 * (Math.pow(1 + apyDecimal, 1 / 365) - 1) * 100, 200)
-    return [buildKintsuEntry(apr)]
-  } catch { return [] }
-}
-
-function buildKintsuEntry(apr: number): AprEntry {
-  return {
-    protocol: 'Kintsu',
-    logo: '🔷',
-    url: 'https://kintsu.xyz/vaults',
-    tokens: ['WMON'],
-    label: 'superMON Vault',
-    apr,
-    type: 'vault',
-    isStable: false,
-  }
-}
-
-// ─── GEARBOX V3 — lending pools ──────────────────────────────────────────────
-// Source: static JSON updated by GearBox with each deployment.
-// supplyRate is already annualised in RAY (1e27). APR = supplyRate / 1e27 * 100.
-
-const GEARBOX_STATIC_URL   = 'https://state-cache.gearbox.foundation/Monad.json'
-const GEARBOX_APY_URL      = 'https://state-cache.gearbox.foundation/apy-server/latest.json'
-
-const GEARBOX_POOL_LIST = [
-  { addr: '0x09cA6b76276eC0682adb896418b99CB7E44a58A0', token: 'WMON', isStable: false },
-  { addr: '0x6B343F7B797f1488AA48C49d540690F2b2c89751', token: 'USDC', isStable: true  },
-  { addr: '0xc4173359087CE643235420b7bC610d9B0CF2B82D', token: 'AUSD', isStable: true  },
-  { addr: '0x164A35F31e4E0F6c45D500962a6978D2cbD5a16b', token: 'USDT', isStable: true  },
-  { addr: '0x34752948B0dc28969485Df2066fFE86D5dc36689', token: 'WMON', isStable: false },
-]
-
-// Returns a map of pool address (lowercase) → total extraAPY from incentive programs
-async function fetchGearboxExtraApy(): Promise<Map<string, number>> {
-  const map = new Map<string, number>()
-  try {
-    const res = await fetch(GEARBOX_APY_URL, {
-      signal: AbortSignal.timeout(8_000),
-      cache: 'no-store',
-    })
-    if (!res.ok) return map
-    const data = await res.json()
-    const pools: any[] = data?.chains?.['143']?.pools?.data ?? []
-    const now = Math.floor(Date.now() / 1000)
-
-    for (const entry of pools) {
-      const addr = (entry?.pool ?? '').toLowerCase()
-      const extraAPY: any[] = entry?.rewards?.extraAPY ?? []
-      const total = extraAPY
-        .filter((e: any) => !e.endTimestamp || e.endTimestamp > now)
-        .reduce((sum: number, e: any) => sum + (Number(e.apy) || 0), 0)
-      if (total > 0) map.set(addr, total)
-    }
-  } catch { /* ignore, just no extra APY */ }
-  return map
-}
-
-async function fetchGearbox(): Promise<AprEntry[]> {
-  try {
-    const [poolsRes, extraApyMap] = await Promise.all([
-      fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
-      fetchGearboxExtraApy(),
-    ])
-    if (!poolsRes.ok) return []
-    const data = await poolsRes.json()
-    const markets: any[] = data?.markets ?? []
+    const products: any[] = data?.products ?? []
+    if (!Array.isArray(products) || products.length === 0) return []
 
     const out: AprEntry[] = []
-    for (const m of markets) {
-      const pool = m?.pool
-      if (!pool || pool.isPaused) continue
+    for (const p of products) {
+      const tvlUsd = Number(p.tvl?.usd ?? 0)
+      const apy7d  = Number(p.apy?.value7d  ?? 0)
+      const apy30d = Number(p.apy?.value30d ?? 0)
+      const apy    = apy7d > 0 ? apy7d : apy30d   // prefer 7d, fall back to 30d
 
-      const addr: string = pool?.baseParams?.addr ?? ''
-      const meta = GEARBOX_POOL_LIST.find(p => p.addr.toLowerCase() === addr.toLowerCase())
-      if (!meta) continue
+      if (tvlUsd < 100_000) continue
+      if (apy <= 0) continue
+      const networks: string[] = Array.isArray(p.networks) ? p.networks : []
+      if (!networks.includes('evm:monad')) continue   // only show vaults deployed on Monad
 
-      const supplyRayStr: string = pool?.supplyRate?.__value ?? '0'
-      const supplyRay = BigInt(supplyRayStr)
-      if (supplyRay === 0n) continue
+      const apr = Math.min(apyToApr(apy) * 100, 200)
+      if (apr < 0.01) continue
 
-      // supplyRate is annualised in RAY (1e27)
-      const baseApr = Number(supplyRay) / 1e27 * 100
-      if (baseApr < 0.01 || baseApr > 500) continue
-
-      const extraApr = extraApyMap.get(addr.toLowerCase()) ?? 0
-      const apr = baseApr + extraApr
+      const symbol = String(p.symbol ?? '')
+      const name   = String(p.name   ?? symbol)
 
       out.push({
-        protocol: 'GearBox V3',
-        logo: '⚙️',
-        url: 'https://app.gearbox.fi/pools?chainId=143',
-        tokens: [meta.token],
-        label: pool.name ?? meta.token,
+        protocol: 'Midas',
+        logo: '🏛️',
+        url: 'https://app.midas.app',
+        tokens: [symbol],
+        label: name,
         apr,
-        type: 'lend',
-        isStable: meta.isStable,
+        tvl: tvlUsd,
+        type: 'vault',
+        isStable: isStable(symbol),
       })
     }
     return out
