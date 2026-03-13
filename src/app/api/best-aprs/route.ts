@@ -420,12 +420,25 @@ async function fetchKuru(): Promise<AprEntry[]> {
   return []
 }
 
-// ─── CURVANCE — lending markets via Merkl API ────────────────────────────────
-// API: GET https://api.merkl.xyz/v4/opportunities?items=100&tokenTypes=TOKEN&mainProtocolId=curvance&action=LEND
-// Response: array of opportunities. Fields used: apr (already in %), status, tokens[], name, depositUrl, tvl
-// Token structure: each opportunity has [cToken (wrapper), underlyingToken] or [underlying, cToken]
-//   → underlying is the token whose symbol does NOT start with lowercase "c" (cAUSD, cWMON, cWETH, etc.)
-//   → name format: "Supply <token> to Curvance <market> market" → extract market via regex
+// ─── CURVANCE — lending markets via Merkl API + Floppy native APY ────────────
+// Merkl covers incentive rewards (AUSD, WMON, WETH, YZM markets).
+// Curvance also hosts LST markets (sMON, shMON, gMON, syzUSD) whose APR comes
+// entirely from the underlying vault's native APY (tracked by Floppy).
+// These LST markets have NO Merkl entry, so we synthesize entries directly
+// from the nativeApyMap for any token Curvance supports that Merkl doesn't cover.
+//
+// Curvance LST markets on Monad mainnet (from app.curvance.com source):
+//   sMON  → shMON|WMON, sMON|WMON, gMON|WMON markets
+//   USDC  → WMON/USDC market (Floppy: USDC native yield)
+//   syzUSD → syzUSD/AUSD market
+//   shMON → shMON/WMON market
+const CURVANCE_NATIVE_MARKETS: Array<{ symbol: string; label: string; isStable: boolean }> = [
+  { symbol: 'sMON',   label: 'Curvance sMON/WMON',   isStable: false },
+  { symbol: 'shMON',  label: 'Curvance shMON/WMON',  isStable: false },
+  { symbol: 'gMON',   label: 'Curvance gMON/WMON',   isStable: false },
+  { symbol: 'syzUSD', label: 'Curvance syzUSD/AUSD',  isStable: true  },
+]
+
 async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntry[]> {
   try {
     const res = await fetch(
@@ -441,25 +454,25 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
     )
     if (!res.ok) return []
     const raw = await res.json()
-    // Merkl may return plain array or paginated object { data: [...] }
     const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
     const entries: AprEntry[] = []
+    const merklSymbols = new Set<string>()
 
     for (const opp of data) {
       if (opp.status !== 'LIVE') continue
       const apr = Number(opp.apr ?? 0)
       if (apr <= 0) continue
 
-      // Curvance wrappers always start with lowercase 'c' + letter: cAUSD, cWMON, cearnAUSD, cYZM, cUSDC
-      // Underlying tokens never start with 'c': AUSD, WMON, earnAUSD, YZM, USDC, WETH, syzUSD, etc.
+      // Curvance wrappers start with 'c' + letter: cAUSD, cWMON, cearnAUSD, cYZM, cUSDC
       const tokens: any[] = opp.tokens ?? []
       const underlying =
         tokens.find((t: any) => !/^c[A-Za-z]/.test(t.symbol ?? '')) ??
         tokens.find((t: any) => t.verified === true) ??
         tokens[0]
       const tokenSymbol = underlying?.symbol ?? 'TOKEN'
-      const isStableToken = ['USDC','AUSD','USDT','USDT0','DAI','earnAUSD','sAUSD'].includes(tokenSymbol)
+      merklSymbols.add(tokenSymbol)
 
+      const isStableToken = STABLECOINS.has(tokenSymbol)
       const marketMatch = (opp.name as string)?.match(/Curvance (.+?) market/)
       const label = marketMatch ? `Curvance ${marketMatch[1]}` : (opp.name ?? `Curvance ${tokenSymbol}`)
 
@@ -477,6 +490,26 @@ async function fetchCurvance(nativeApyMap: Map<string, number>): Promise<AprEntr
         isStable: isStableToken,
       })
     }
+
+    // Synthetic entries for LST markets not covered by Merkl incentives
+    // These earn purely from the native vault APY (Floppy source)
+    for (const market of CURVANCE_NATIVE_MARKETS) {
+      if (merklSymbols.has(market.symbol)) continue  // already included above
+      const nativeApy = nativeApyMap.get(market.symbol.toUpperCase()) ?? 0
+      if (nativeApy <= 0) continue
+      const nativeApr = apyToApr(nativeApy / 100) * 100
+      entries.push({
+        protocol: 'Curvance',
+        logo: '🔵',
+        url: 'https://app.curvance.com',
+        tokens: [market.symbol],
+        label: market.label,
+        apr: nativeApr,
+        type: 'lend',
+        isStable: market.isStable,
+      })
+    }
+
     return entries
   } catch { return [] }
 }
@@ -1100,7 +1133,7 @@ async function fetchAllData() {
   const stableAPRs = all.filter(e => e.isStable).sort(byApr).slice(0, 5)
   const pools  = all.filter(e => e.type === 'pool').sort(byApr).slice(0, 10)
   const vaults = all.filter(e => e.type === 'vault').sort(byApr).slice(0, 10)
-  const lends  = all.filter(e => e.type === 'lend').sort(byApr).slice(0, 10)
+  const lends  = all.filter(e => e.type === 'lend').sort(byApr).slice(0, 20)
 
   return {
     stableAPRs,
