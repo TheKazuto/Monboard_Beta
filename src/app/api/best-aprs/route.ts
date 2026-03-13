@@ -323,7 +323,14 @@ function upshiftTokenFromName(name: string): string {
 
 async function fetchUpshiftRaw(): Promise<any[]> {
   try {
-    const res = await fetch(UPSHIFT_API_URL, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
+    const res = await fetch(UPSHIFT_API_URL, {
+      signal: AbortSignal.timeout(10_000),
+      cache: 'no-store',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+      },
+    })
     if (!res.ok) return []
     const data = await res.json()
     return Array.isArray(data) ? data : []
