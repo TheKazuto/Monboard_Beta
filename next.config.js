@@ -1,11 +1,5 @@
 /** @type {import('next').NextConfig} */
 
-// ─── Security Headers ─────────────────────────────────────────────────────────
-// NOTA: script-src, connect-src e frame-src foram removidos do CSP.
-// O AdsTerra rotaciona domínios dinamicamente a cada impressão — qualquer
-// whitelist estática vai sempre bloquear os novos domínios gerados.
-// Os demais headers de segurança (HSTS, X-Frame-Options, etc.) são mantidos.
-
 const nextConfig = {
   images: {
     unoptimized: true,
@@ -23,6 +17,7 @@ const nextConfig = {
   async headers() {
     return [
       {
+        // Headers gerais para todas as rotas
         source: '/(.*)',
         headers: [
           { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
@@ -31,10 +26,17 @@ const nextConfig = {
           { key: 'Permissions-Policy',        value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()' },
           { key: 'X-XSS-Protection',          value: '0' },
           { key: 'X-Permitted-Cross-Domain-Policies', value: 'none' },
-          // X-Frame-Options: DENY mantido — protege contra clickjacking da
-          // *nossa* página sendo embarcada em outros sites. Não afeta iframes
-          // de terceiros que a nossa página carrega.
-          { key: 'X-Frame-Options',           value: 'DENY' },
+          // SAMEORIGIN em vez de DENY — permite iframes same-origin
+          // (necessário para /api/ad-frame carregar dentro do AdBanner)
+          { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+        ],
+      },
+      {
+        // A rota do banner não deve enviar X-Frame-Options
+        // para que o iframe possa carregá-la sem conflito
+        source: '/api/ad-frame',
+        headers: [
+          { key: 'X-Frame-Options', value: '' },
         ],
       },
     ]
