@@ -434,7 +434,7 @@ async function fetchLagoon(): Promise<AprEntry[]> {
         tokens: [token],
         label: `${vault.name} (${curator})`,
         apr,
-        tvl: Number(vault.tvl ?? 0),
+        tvl: Number(vault.state?.totalAssetsUsd ?? vault.tvl ?? 0),
         type: 'vault',
         isStable: ['USDC', 'USDT', 'AUSD', 'DAI', 'USDT0'].includes(token),
       })
