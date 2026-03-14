@@ -29,7 +29,7 @@ export interface NFTData {
   id: string; contract: string; tokenId: string
   collection: string; symbol: string; name: string
   image: string | null; floorMON: number; floorUSD: number
-  magicEdenUrl: string
+  openSeaUrl: string  // was magicEdenUrl — migrated to OpenSea
 }
 
 export interface PortfolioTotals {
@@ -44,7 +44,7 @@ export interface PortfolioTotals {
   tokens:              TokenData[]  // full token list — consumed by portfolio page
   nfts:                NFTData[]    // full NFT list   — consumed by portfolio page
   nftTotal:            number       // total NFT count (may exceed nfts.length if >50)
-  nftsNoKey:           boolean      // true when Etherscan API key is missing
+  nftsNoKey:           boolean      // true when OpenSea API key is missing
 }
 
 export type LoadStatus = 'idle' | 'loading' | 'partial' | 'done' | 'error'

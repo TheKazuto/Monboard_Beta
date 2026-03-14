@@ -17,8 +17,11 @@ function decodeAddress(hex: string): string {
   return '0x' + hex.slice(2).slice(-40)
 }
 
-// ─── Known tokens on Monad mainnet ───────────────────────────────────────────
-const KNOWN_TOKENS: Record<string, { symbol: string; decimals: number }> = {
+// ─── Token symbol lookup for UniswapV3 tick display ──────────────────────────
+// Fix #5: was named KNOWN_TOKENS, conflicting with @/lib/monad's KNOWN_TOKENS.
+// Intentionally separate because this map includes LST tokens (sMON, gMON, shMON)
+// not in lib/monad's KNOWN_TOKENS (which focuses on tradeable ERC-20s).
+const TOKEN_SYMBOLS: Record<string, { symbol: string; decimals: number }> = {
   '0x3bd359c1119da7da1d913d1c4d2b7c461115433a': { symbol: 'WMON',  decimals: 18 },
   '0x0555e30da8f98308edb960aa94c0db47230d2b9c': { symbol: 'WBTC',  decimals: 8  },
   '0xee8c0e9f1bffb4eb878d8f15f368a02a35481242': { symbol: 'WETH',  decimals: 18 },
@@ -287,8 +290,9 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
       const tU = parseInt(w[6], 16); const tickUpper = tU > 0x7fffffff ? tU - 0x100000000 : tU
       const liquidity = BigInt('0x' + w[7])
       if (liquidity === 0n) continue
-      const t0sym = KNOWN_TOKENS[token0.toLowerCase()]?.symbol ?? token0.slice(0, 8)
-      const t1sym = KNOWN_TOKENS[token1.toLowerCase()]?.symbol ?? token1.slice(0, 8)
+      // Fix #5: use TOKEN_SYMBOLS instead of KNOWN_TOKENS
+      const t0sym = TOKEN_SYMBOLS[token0.toLowerCase()]?.symbol ?? token0.slice(0, 8)
+      const t1sym = TOKEN_SYMBOLS[token1.toLowerCase()]?.symbol ?? token1.slice(0, 8)
       poolCalls.push(ethCall(factory, getPoolData(token0, token1, fee), pcIdx))
       poolCallMap[pcIdx] = { tickLower, tickUpper, t0sym, t1sym, fee, liquidity }
       pcIdx++
@@ -453,14 +457,6 @@ async function fetchCurve(user: string): Promise<any[]> {
 }
 
 // ─── GEARBOX ──────────────────────────────────────────────────────────────────
-// FIX: A API REST antiga (api.gearbox.finance / pf-api.gearbox.finance) está
-// morta para Monad. Substituído por abordagem on-chain:
-// 1. Busca lista de pools via state-cache.gearbox.foundation/Monad.json (mesmo
-//    endpoint do Best APRs, que funciona)
-// 2. Cada pool Gearbox É o seu próprio diesel token ERC20 — balanceOf(user)
-//    retorna saldo direto. Não há contrato separado.
-// 3. USD value: balance * (expectedLiquidity / totalSupply)
-
 const GEARBOX_STATIC_URL = 'https://state-cache.gearbox.foundation/Monad.json'
 
 const GEARBOX_TOKEN_MAP: Record<string, { token: string; isStable: boolean }> = {
@@ -481,7 +477,6 @@ async function fetchGearbox(user: string): Promise<any[]> {
     const markets: any[] = data?.markets ?? []
     if (!markets.length) return []
 
-    // Extrai pools da lista conhecida (filtra por endereços válidos)
     const pools = markets
       .map((m: any) => m?.pool)
       .filter((p: any) => {
@@ -492,7 +487,6 @@ async function fetchGearbox(user: string): Promise<any[]> {
 
     if (!pools.length) return []
 
-    // Batch balanceOf para todos os pools (o pool addr = diesel token)
     const calls = pools.map((p: any, i: number) =>
       ethCall(p.baseParams.addr, balanceOfData(user), i + 200)
     )
@@ -511,14 +505,11 @@ async function fetchGearbox(user: string): Promise<any[]> {
       const decimals     = Number(pool.decimals ?? 18)
       const sharesFloat  = Number(shares) / Math.pow(10, decimals)
 
-      // expectedLiquidity / totalSupply = preço por share em tokens underlying
       const expectedLiq  = BigInt(pool.expectedLiquidity?.__value ?? '0')
       const totalSupply  = BigInt(pool.totalSupply?.__value ?? pool.totalSupply ?? '0')
       let amountUSD = 0
       if (totalSupply > 0n) {
-        const ratio    = Number(expectedLiq) / Number(totalSupply)
-        const monPrice = meta.isStable ? 1 : 0 // preço do token; MON via parâmetro externo
-        // Para stables ratio ≈ $1, para WMON guardamos em tokens (USD calculado abaixo)
+        const ratio = Number(expectedLiq) / Number(totalSupply)
         amountUSD = meta.isStable ? sharesFloat * ratio : 0
       }
 
@@ -531,7 +522,6 @@ async function fetchGearbox(user: string): Promise<any[]> {
         amountUSD,
         apy: 0,
         netValueUSD: amountUSD,
-        // flag para pós-processamento com monPrice se necessário
         _needsMonPrice: !meta.isStable,
         _expectedLiqPerShare: totalSupply > 0n ? Number(expectedLiq) / Number(totalSupply) / Math.pow(10, decimals) : 0,
       })
@@ -541,14 +531,6 @@ async function fetchGearbox(user: string): Promise<any[]> {
 }
 
 // ─── UPSHIFT ──────────────────────────────────────────────────────────────────
-// FIX: Endereço hardcoded estava errado (0x103222... não existe no mainnet).
-// Endereços corretos confirmados via api.upshift.finance/metrics/vaults_summary:
-//   earnAUSD → 0x36eDbF0C834591BFdfCaC0Ef9605528c75c406aA
-//   earnMON  → 0x5E7568bf8DF8792aE467eCf5638d7c4D18A1881C  (ausente antes)
-// Estratégia: busca vaults dinamicamente via API (mesmo endpoint do Best APRs,
-// com User-Agent obrigatório), filtra chain=143 e nomes de teste, então faz
-// balanceOf on-chain para cada vault. Nunca mais fica desatualizado.
-
 const UPSHIFT_API_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Accept': 'application/json',
@@ -569,7 +551,6 @@ async function fetchUpshift(user: string): Promise<any[]> {
     )
     if (!vaults.length) return []
 
-    // Batch balanceOf para todos os vaults
     const calls = vaults.map((v: any, i: number) =>
       ethCall(v.address, balanceOfData(user), i + 700)
     )
@@ -581,18 +562,15 @@ async function fetchUpshift(user: string): Promise<any[]> {
       const shares = decodeUint(results.find((r: any) => r.id === i + 700)?.result ?? '0x')
       if (shares === 0n) continue
 
-      // amount in underlying: shares * asset_share_ratio
       const decimals    = Number(v.decimals ?? 18)
       const sharesFloat = Number(shares) / Math.pow(10, decimals)
       const ratio       = Number(v.asset_share_ratio ?? 1)
       const underlying  = sharesFloat * ratio
-      // USD value: underlying * underlying_price (price per underlying token in USD)
       const price       = Number(v.underlying_price ?? 0)
       const amountUSD   = underlying * price
 
       if (sharesFloat < 0.001 && amountUSD < 0.01) continue
 
-      // Inferir asset symbol a partir do nome do vault
       const name = v.vault_name ?? ''
       const asset = name.includes('MON') ? 'MON'
         : name.includes('AUSD') ? 'AUSD'
@@ -600,10 +578,9 @@ async function fetchUpshift(user: string): Promise<any[]> {
         : name.includes('BTC')  ? 'WBTC'
         : 'unknown'
 
-      // APY: preferir 7d_apy, depois 30d_apy
       const apy7d  = Number(v['7d_apy'] ?? 0)
       const apy30d = Number(v['30d_apy'] ?? 0)
-      const apy    = (apy7d > 0 ? apy7d : apy30d) * 100  // decimal → %
+      const apy    = (apy7d > 0 ? apy7d : apy30d) * 100
 
       positions.push({
         protocol: 'Upshift', type: 'vault', logo: '🔺',
@@ -687,8 +664,10 @@ async function fetchShMonad(user: string, monPrice: number): Promise<any[]> {
 }
 
 // ─── LAGOON FINANCE ───────────────────────────────────────────────────────────
-// FIX: Adicionado User-Agent — APIs DeFi frequentemente bloqueiam sem ele
-// (padrão aprendido com Kuru/Upshift).
+// Fix #9: Batched all RPC calls into a single round-trip.
+// Previously: 1 batch for balanceOf all vaults, then a SEPARATE rpcBatch(totalAssets+totalSupply)
+// per vault with a non-zero balance — serialised calls when user had multiple positions.
+// Now: balanceOf + totalAssets + totalSupply for ALL vaults in one single batch.
 
 async function fetchLagoon(user: string): Promise<any[]> {
   const addr = user.toLowerCase()
@@ -708,23 +687,24 @@ async function fetchLagoon(user: string): Promise<any[]> {
     const vaults: any[] = data?.vaults ?? data ?? []
     if (vaults.length === 0) return []
 
-    const balCalls = vaults.map((v: any, i: number) => ethCall(v.address, '0x70a08231' + paddedAddr, i))
-    const balResults = await rpcBatch(balCalls)
+    // Single batch: balanceOf + totalAssets + totalSupply for all vaults at once
+    const calls = vaults.flatMap((v: any, i: number) => [
+      ethCall(v.address, '0x70a08231' + paddedAddr,  i * 3),      // balanceOf
+      ethCall(v.address, '0x01e1d114',                i * 3 + 1), // totalAssets
+      ethCall(v.address, '0x18160ddd',                i * 3 + 2), // totalSupply
+    ])
+    const results = await rpcBatch(calls)
 
     const positions: any[] = []
     for (let i = 0; i < vaults.length; i++) {
       const v = vaults[i]
-      const shares = decodeUint(balResults.find((r: any) => r.id === i)?.result ?? '0x')
+      const shares      = decodeUint(results.find((r: any) => r.id === i * 3)?.result     ?? '0x')
       if (shares === 0n) continue
 
-      const [taRes, tsRes] = await rpcBatch([
-        ethCall(v.address, '0x01e1d114', 500),
-        ethCall(v.address, '0x18160ddd', 501),
-      ])
-      const totalAssets = decodeUint(taRes?.result ?? '0x')
-      const totalSupply = decodeUint(tsRes?.result ?? '0x')
-      const decimals = Number(v.decimals ?? 18)
-      const shareFloat = Number(shares) / Math.pow(10, decimals)
+      const totalAssets = decodeUint(results.find((r: any) => r.id === i * 3 + 1)?.result ?? '0x')
+      const totalSupply = decodeUint(results.find((r: any) => r.id === i * 3 + 2)?.result ?? '0x')
+      const decimals    = Number(v.decimals ?? 18)
+      const shareFloat  = Number(shares) / Math.pow(10, decimals)
       let amountUSD = 0
       if (totalSupply > 0n) {
         const ratio = Number(totalAssets) / Number(totalSupply)
@@ -747,11 +727,6 @@ async function fetchLagoon(user: string): Promise<any[]> {
 }
 
 // ─── KURU (CLOB DEX Vault LP positions) ──────────────────────────────────────
-// FIX: Endereço do vault MON/USDC estava errado (0xd6eae39b... é vault
-// inativo/antigo). Endereço correto confirmado via api.kuru.io/api/v3/vaults:
-//   MON/AUSD → 0x4869a4c7657cef5e5496c9ce56dde4cd593e4923  (correto, mantido)
-//   MON/USDC → 0xd0f8a6422ccdd812f29d8fb75cf5fcd41483badc  (isBoosted:true, ativo)
-
 const KURU_VAULTS = [
   { address: '0x4869a4c7657cef5e5496c9ce56dde4cd593e4923', name: 'Kuru MON/AUSD', asset: 'AUSD', decimals: 6 },
   { address: '0xd0f8a6422ccdd812f29d8fb75cf5fcd41483badc', name: 'Kuru MON/USDC', asset: 'USDC', decimals: 6 },
@@ -762,8 +737,8 @@ async function fetchKuru(user: string): Promise<any[]> {
     const calls: any[] = []
     KURU_VAULTS.forEach((v, i) => {
       calls.push(ethCall(v.address, balanceOfData(user), 900 + i * 3))
-      calls.push(ethCall(v.address, '0x01e1d114', 901 + i * 3)) // totalAssets
-      calls.push(ethCall(v.address, '0x18160ddd', 902 + i * 3)) // totalSupply
+      calls.push(ethCall(v.address, '0x01e1d114', 901 + i * 3))
+      calls.push(ethCall(v.address, '0x18160ddd', 902 + i * 3))
     })
     const results = await rpcBatch(calls)
     const items: any[] = []
@@ -916,34 +891,10 @@ async function fetchEulerV2(user: string): Promise<any[]> {
   } catch { return [] }
 }
 
-// ─── MIDAS RWA ────────────────────────────────────────────────────────────────
-// Endereços pendentes de confirmação no Monad mainnet.
-const MIDAS_TOKENS: { address: string; symbol: string; decimals: number; apy: number }[] = []
-
-async function fetchMidas(user: string): Promise<any[]> {
-  try {
-    if (!MIDAS_TOKENS.length) return []
-    const calls = MIDAS_TOKENS.map((t, i) => ethCall(t.address, balanceOfData(user), i + 900))
-    const results = await rpcBatch(calls)
-    const positions: any[] = []
-    MIDAS_TOKENS.forEach((t, i) => {
-      const bal = decodeUint(results[i]?.result ?? '0x')
-      if (bal === 0n) return
-      const amount = Number(bal) / Math.pow(10, t.decimals)
-      if (amount < 0.001) return
-      const amountUSD = amount
-      positions.push({
-        protocol: 'Midas', type: 'vault', logo: '🏛️',
-        url: 'https://midas.app', chain: 'Monad',
-        label: t.symbol === 'mTBILL' ? 'Tokenized US T-Bills' : 'Basis Trading Strategy',
-        asset: t.symbol, amount, amountUSD, apy: t.apy, netValueUSD: amountUSD,
-      })
-    })
-    return positions
-  } catch { return [] }
-}
-
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
+// Fix #8: fetchMidas removed — MIDAS_TOKENS was an empty array, making the
+// function always return [] immediately. Removed call from Promise.allSettled.
+
 export async function GET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address')
   if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
@@ -953,7 +904,7 @@ export async function GET(req: NextRequest) {
   const [monPriceR] = await Promise.allSettled([getMonPrice()])
   const MON_PRICE = monPriceR.status === 'fulfilled' ? (monPriceR.value as number) : 0
 
-  const [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, kintsuR, magmaR, shmonadR, lagoonR, kuruR, curvanceR, eulerR, midasR] =
+  const [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, kintsuR, magmaR, shmonadR, lagoonR, kuruR, curvanceR, eulerR] =
     await Promise.allSettled([
       fetchNeverland(address),
       fetchMorpho(address),
@@ -969,7 +920,6 @@ export async function GET(req: NextRequest) {
       fetchKuru(address),
       fetchCurvance(address),
       fetchEulerV2(address),
-      fetchMidas(address),
     ])
 
   function unwrap(r: PromiseSettledResult<any[]>): any[] {
@@ -981,7 +931,7 @@ export async function GET(req: NextRequest) {
     ...unwrap(curveR), ...unwrap(gearR), ...unwrap(upshiftR),
     ...unwrap(kintsuR), ...unwrap(magmaR), ...unwrap(shmonadR),
     ...unwrap(lagoonR), ...unwrap(kuruR),
-    ...unwrap(curvanceR), ...unwrap(eulerR), ...unwrap(midasR),
+    ...unwrap(curvanceR), ...unwrap(eulerR),
   ]
 
   // Pós-processamento: Gearbox posições WMON precisam do preço do MON

@@ -8,9 +8,8 @@ import type { Currency, TimeRange, Theme } from '@/contexts/PreferencesContext'
 import { CURRENCIES, CURRENCY_LABELS } from '@/contexts/PreferencesContext'
 import { User, Copy, ExternalLink, Shield, CheckCircle, Lock, Sun, Moon } from 'lucide-react'
 import { shortenAddr } from '@/contexts/TransactionContext'
-
-// Single stable object reference — avoids creating a new object on every render
-const SORA = { fontFamily: 'Sora, sans-serif' } as const
+// Fix #6: import SORA from shared lib instead of redeclaring locally
+import { SORA } from '@/lib/styles'
 
 export default function AccountPage() {
   const [copied, setCopied] = useState(false)
@@ -100,163 +99,96 @@ export default function AccountPage() {
               {hasNFT ? '✅ Premium Access Unlocked' : 'MonBoard NFT Access'}
             </h3>
             {hasNFT ? (
-              <p className="text-sm text-emerald-700 mt-1">You hold a MonBoard NFT and have access to all premium features including Telegram alerts and wallet monitoring.</p>
+              <p className="text-emerald-600 text-sm mt-1">You have access to all premium features.</p>
             ) : (
-              <>
-                <p className="text-sm text-gray-500 mt-1 mb-3">Hold a MonBoard NFT to unlock premium features:</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
-                  {[
-                    { icon: '🔔', text: 'Real-time Telegram alerts' },
-                    { icon: '👁️', text: 'Monitor other wallets' },
-                    { icon: '📊', text: 'Advanced analytics' },
-                    { icon: '⚡', text: 'Priority support' },
-                  ].map(f => (
-                    <div key={f.text} className="flex items-center gap-2 text-sm text-gray-600">
-                      <span>{f.icon}</span>
-                      {f.text}
-                    </div>
-                  ))}
-                </div>
-                <button className="btn-primary text-sm px-5">
-                  Get MonBoard NFT — Coming Soon
-                </button>
-              </>
+              <div>
+                <p className="text-gray-500 text-sm mt-1">
+                  Hold a MonBoard NFT to unlock premium features like wallet monitoring and Telegram alerts.
+                </p>
+                <button className="mt-3 btn-primary text-xs px-4 py-2">Get MonBoard NFT</button>
+              </div>
             )}
           </div>
         </div>
       </div>
 
-      {/* Settings */}
-      <div className="card p-5">
-        <h2 className="font-display font-semibold text-gray-800 mb-4" style={SORA}>Preferences</h2>
-        <div className="space-y-4">
-          {/* Theme */}
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-800">Appearance</p>
-              <p className="text-xs text-gray-400">Switch between light and dark mode</p>
-            </div>
-            <button
-              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-              className={`relative w-16 h-8 rounded-full transition-all duration-300 ${
-                theme === 'dark'
-                  ? 'bg-violet-600'
-                  : 'bg-violet-100 border border-violet-200'
-              }`}
-              aria-label="Toggle theme"
-            >
-              <div
-                className={`absolute top-1 w-6 h-6 rounded-full flex items-center justify-center transition-all duration-300 ${
-                  theme === 'dark'
-                    ? 'left-9 bg-violet-900'
-                    : 'left-1 bg-white shadow-sm'
-                }`}
-              >
-                {theme === 'dark'
-                  ? <Moon size={14} className="text-violet-300" />
-                  : <Sun size={14} className="text-violet-500" />
-                }
-              </div>
-            </button>
-          </div>
+      {/* Preferences */}
+      <div className="card p-5 space-y-5">
+        <h3 className="font-display font-semibold text-gray-800" style={SORA}>Preferences</h3>
 
-          {/* Currency */}
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-800">Currency Display</p>
-              <p className="text-xs text-gray-400">Show portfolio values in your preferred currency</p>
-            </div>
-            <select
-              value={currency}
-              onChange={e => setCurrency(e.target.value as Currency)}
-              className="text-sm border border-violet-100 rounded-lg px-3 py-1.5 text-gray-700 bg-violet-50/30 focus:outline-none focus:border-violet-300"
-            >
-              {CURRENCIES.map(c => (
-                <option key={c} value={c}>{CURRENCY_LABELS[c]}</option>
-              ))}
-            </select>
+        {/* Currency */}
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-gray-700">Display Currency</p>
+            <p className="text-xs text-gray-400 mt-0.5">Values shown across the dashboard</p>
           </div>
-
-          {/* Live exchange rates */}
-          <div className="rounded-xl bg-violet-50/60 border border-violet-100 p-3">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs font-medium text-violet-700">Live Exchange Rates (vs USD)</p>
-              {ratesUpdatedAt ? (
-                <p className="text-[10px] text-violet-400">
-                  Updated {new Date(ratesUpdatedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                </p>
-              ) : (
-                <p className="text-[10px] text-violet-400">Fallback rates</p>
-              )}
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              {CURRENCIES.map(c => (
-                <div
-                  key={c}
-                  onClick={() => setCurrency(c)}
-                  className={`rounded-lg p-2 text-center cursor-pointer transition-all ${
-                    currency === c
-                      ? 'bg-violet-600 text-white'
-                      : 'bg-white border border-violet-100 hover:border-violet-300'
-                  }`}
-                >
-                  <p className={`text-xs font-bold ${currency === c ? 'text-white' : 'text-gray-700'}`}>{c}</p>
-                  <p className={`text-[11px] mt-0.5 ${currency === c ? 'text-violet-200' : 'text-gray-400'}`}>
-                    {c === 'USD' ? '1.0000' : rates[c].toFixed(4)}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Default time range */}
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-800">Default Time Range</p>
-              <p className="text-xs text-gray-400">Default range for portfolio history charts</p>
-            </div>
-            <select
-              value={defaultRange}
-              onChange={e => setDefaultRange(e.target.value as TimeRange)}
-              className="text-sm border border-violet-100 rounded-lg px-3 py-1.5 text-gray-700 bg-violet-50/30 focus:outline-none focus:border-violet-300"
-            >
-              <option value="7d">7 Days</option>
-              <option value="30d">30 Days</option>
-              <option value="90d">90 Days</option>
-              <option value="1y">1 Year</option>
-            </select>
-          </div>
+          <select
+            value={currency}
+            onChange={e => setCurrency(e.target.value as Currency)}
+            className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 focus:outline-none focus:ring-2 focus:ring-violet-300"
+          >
+            {CURRENCIES.map(c => (
+              <option key={c} value={c}>{CURRENCY_LABELS[c]}</option>
+            ))}
+          </select>
         </div>
-      </div>
 
-      {/* About */}
-      <div className="card p-5">
-        <h2 className="font-display font-semibold text-gray-800 mb-3" style={SORA}>About MonBoard</h2>
-        <p className="text-sm text-gray-500 mb-3">
-          MonBoard is the premier portfolio dashboard for the Monad ecosystem. Track your assets, DeFi positions, and NFTs in one place.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          {[
-            { label: 'Version', value: '0.1.0 (Beta)' },
-            { label: 'Network', value: 'Monad Mainnet' },
-            { label: 'RPC', value: 'rpc.monad.xyz' },
-          ].map(info => (
-            <div key={info.label} className="flex-1 min-w-[100px] bg-violet-50 rounded-lg p-3">
-              <p className="text-xs text-gray-400">{info.label}</p>
-              <p className="text-sm font-semibold text-gray-700">{info.value}</p>
-            </div>
-          ))}
+        {/* Default Range */}
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-gray-700">Default Chart Range</p>
+            <p className="text-xs text-gray-400 mt-0.5">Default time range for portfolio history</p>
+          </div>
+          <select
+            value={defaultRange}
+            onChange={e => setDefaultRange(e.target.value as TimeRange)}
+            className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 focus:outline-none focus:ring-2 focus:ring-violet-300"
+          >
+            {(['7d', '30d', '90d', '1y'] as TimeRange[]).map(r => (
+              <option key={r} value={r}>{r === '7d' ? '7 Days' : r === '30d' ? '30 Days' : r === '90d' ? '90 Days' : '1 Year'}</option>
+            ))}
+          </select>
         </div>
+
+        {/* Theme */}
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-gray-700">Theme</p>
+            <p className="text-xs text-gray-400 mt-0.5">Light or dark interface</p>
+          </div>
+          <button
+            onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+            className="flex items-center gap-2 text-sm border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 hover:bg-gray-50 transition-colors"
+          >
+            {theme === 'light' ? <Sun size={14} /> : <Moon size={14} />}
+            {theme === 'light' ? 'Light' : 'Dark'}
+          </button>
+        </div>
+
+        {/* Exchange rates info */}
+        {ratesUpdatedAt && (
+          <p className="text-xs text-gray-300 pt-2 border-t border-gray-50">
+            Exchange rates updated: {new Date(ratesUpdatedAt).toLocaleTimeString()}
+          </p>
+        )}
       </div>
 
       {/* Disconnect */}
       {isConnected && (
-        <button
-          onClick={disconnect}
-          className="w-full py-3 rounded-xl border-2 border-red-100 text-red-500 text-sm font-medium hover:bg-red-50 transition-colors"
-        >
-          Disconnect Wallet
-        </button>
+        <div className="card p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-700">Disconnect Wallet</p>
+              <p className="text-xs text-gray-400 mt-0.5">Remove wallet connection from this browser</p>
+            </div>
+            <button
+              onClick={disconnect}
+              className="text-xs font-semibold text-red-500 hover:text-red-700 border border-red-200 hover:border-red-300 px-4 py-2 rounded-lg transition-colors"
+            >
+              Disconnect
+            </button>
+          </div>
+        </div>
       )}
     </div>
   )

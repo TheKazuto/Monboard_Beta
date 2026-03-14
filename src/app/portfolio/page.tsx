@@ -21,14 +21,12 @@ function fmtBal(b: number) {
   return b.toFixed(6)
 }
 
-// Fix #13 (MÉDIO): Sanitize NFT/token image URLs before rendering in <img> tags.
-// NFT metadata comes from arbitrary on-chain URIs. Without this check, a malicious
-// NFT could inject javascript: or data:text/html: URIs as image sources.
-// The server-side nfts route already sanitizes, but this adds defense-in-depth.
+// Sanitize NFT/token image URLs before rendering in <img> tags.
+// NFT metadata comes from arbitrary on-chain URIs — defense-in-depth against
+// malicious javascript: or data: URIs injected via NFT metadata.
 const SAFE_IMAGE_ORIGIN = /^https:\/\//i
 function sanitizeImgSrc(url: string | null | undefined): string | null {
   if (!url) return null
-  // Only allow HTTPS URLs — blocks javascript:, data:, file:, etc.
   return SAFE_IMAGE_ORIGIN.test(url) ? url : null
 }
 
@@ -120,7 +118,8 @@ function TokenRow({ token }: { token: TokenData }) {
 function NFTCard({ nft }: { nft: NFTData }) {
   const [imgErr, setImgErr] = useState(false)
   return (
-    <a href={nft.magicEdenUrl} target="_blank" rel="noopener noreferrer"
+    // Fix #1: was nft.magicEdenUrl — migrated to OpenSea
+    <a href={nft.openSeaUrl} target="_blank" rel="noopener noreferrer"
       className="border border-violet-100 rounded-xl overflow-hidden hover:border-violet-300 hover:shadow-md transition-all group block">
       <div className="aspect-square bg-gradient-to-br from-violet-100 to-purple-200 flex items-center justify-center overflow-hidden">
         {nft.image && !imgErr
@@ -156,7 +155,8 @@ function NFTCard({ nft }: { nft: NFTData }) {
 function NFTListRow({ nft }: { nft: NFTData }) {
   const [imgErr, setImgErr] = useState(false)
   return (
-    <a href={nft.magicEdenUrl} target="_blank" rel="noopener noreferrer"
+    // Fix #1: was nft.magicEdenUrl — migrated to OpenSea
+    <a href={nft.openSeaUrl} target="_blank" rel="noopener noreferrer"
       className="flex items-center gap-4 px-5 py-3.5 border-b border-gray-50 hover:bg-violet-50/40 transition-all group">
       <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-100 to-purple-200 flex items-center justify-center overflow-hidden shrink-0">
         {nft.image && !imgErr
@@ -219,61 +219,37 @@ export default function PortfolioPage() {
         )}
       </div>
 
-      {/* Not connected */}
-      {!isConnected && (
-        <div className="card flex flex-col items-center justify-center py-20 gap-4 text-center">
-          <div className="w-16 h-16 rounded-full bg-violet-50 flex items-center justify-center">
-            <Wallet size={28} className="text-violet-300" />
+      {!isConnected ? (
+        <div className="card p-10 text-center">
+          <div className="w-16 h-16 rounded-full bg-violet-50 flex items-center justify-center mx-auto mb-4">
+            <Wallet size={28} className="text-violet-400" />
           </div>
-          <div>
-            <p className="font-semibold text-gray-600 mb-1">Connect your wallet</p>
-            <p className="text-sm text-gray-400">Your portfolio will appear here once connected</p>
-          </div>
+          <h2 className="text-lg font-bold text-gray-800 mb-2" style={SORA}>Connect your wallet</h2>
+          <p className="text-gray-500 text-sm">Connect your wallet to see your token and NFT portfolio</p>
         </div>
-      )}
-
-      {isConnected && (
+      ) : (
         <>
-          {/* ── Summary Cards ──────────────────────────────────────────────── */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-
-            {/* Total Portfolio Value */}
-            <div className="card p-5 col-span-2">
-              <p className="text-xs text-gray-400 font-medium mb-2">Total Portfolio Value</p>
-              {isLoading && totalValue === 0
-                ? <Skeleton className="h-8 w-40" />
-                : (
-                  <p className="font-bold text-3xl text-gray-900" style={SORA}>
-                    {fmtUSD(totalValue)}
-                  </p>
-                )
-              }
-              {/* Breakdown bar */}
-              {totalValue > 0 && !isLoading && (
-                <div className="mt-3">
-                  <div className="h-1.5 rounded-full bg-gray-100 overflow-hidden flex">
-                    <div className="h-full bg-violet-500 transition-all" style={{ width: `${(tokenValue / totalValue) * 100}%` }} />
-                    <div className="h-full bg-blue-400 transition-all" style={{ width: `${(nftValue / totalValue) * 100}%` }} />
-                  </div>
-                  <div className="flex items-center gap-4 mt-2">
-                    <div className="flex items-center gap-1.5">
-                      <div className="w-2 h-2 rounded-full bg-violet-500" />
-                      <span className="text-xs text-gray-400">Tokens {`${((tokenValue / totalValue) * 100).toFixed(0)}%`}</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <div className="w-2 h-2 rounded-full bg-blue-400" />
-                      <span className="text-xs text-gray-400">NFTs {`${((nftValue / totalValue) * 100).toFixed(0)}%`}</span>
-                    </div>
-                  </div>
+          {/* ── Summary row ─────────────────────────────────────────────── */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {/* Total Value */}
+            <div className="card p-5 sm:col-span-1">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-7 h-7 rounded-lg bg-violet-50 flex items-center justify-center shrink-0">
+                  <Wallet size={14} className="text-violet-500" />
                 </div>
-              )}
+                <p className="text-xs text-gray-400 font-medium">Total Value</p>
+              </div>
+              {isLoading && totalValue === 0
+                ? <Skeleton className="h-7 w-28 mt-1" />
+                : <p className="font-bold text-xl text-gray-800" style={SORA}>{fmtUSD(totalValue)}</p>
+              }
             </div>
 
             {/* Token Value */}
             <div className="card p-5">
               <div className="flex items-center gap-2 mb-2">
-                <div className="w-7 h-7 rounded-lg bg-violet-100 flex items-center justify-center shrink-0">
-                  <Coins size={14} className="text-violet-600" />
+                <div className="w-7 h-7 rounded-lg bg-emerald-50 flex items-center justify-center shrink-0">
+                  <Coins size={14} className="text-emerald-500" />
                 </div>
                 <p className="text-xs text-gray-400 font-medium">Token Value</p>
               </div>
@@ -310,7 +286,7 @@ export default function PortfolioPage() {
           {/* ── Portfolio History ─────────────────────────────────────────── */}
           <PortfolioHistory />
 
-          {/* ── Google Ad slot ────────────────────────────────────────────── */}
+          {/* ── AdsTerra banner slot ──────────────────────────────────────── */}
           <AdBanner className="min-h-[120px]" />
 
           {/* ── Tokens table ─────────────────────────────────────────────── */}
@@ -325,31 +301,30 @@ export default function PortfolioPage() {
               </div>
               {address && (
                 <a href={`https://monadscan.com/address/${address}`} target="_blank" rel="noopener noreferrer"
-                  className="text-xs text-violet-500 hover:text-violet-700 flex items-center gap-1">
-                  View on MonadScan <ExternalLink size={11} />
+                  className="text-xs text-violet-500 hover:text-violet-700 transition-colors">
+                  View on explorer →
                 </a>
               )}
             </div>
 
-            {isLoading && tokens.length === 0 && <TableSkeleton />}
-            {!isLoading && tokens.length === 0 && (
-              <EmptyState icon={<Coins size={22} />} title="No tokens found" subtitle="Your token balances will appear here" />
-            )}
-
-            {tokens.length > 0 && (
+            {isLoading && tokens.length === 0 ? (
+              <TableSkeleton />
+            ) : tokens.length === 0 ? (
+              <EmptyState icon={<Coins size={22} />} title="No tokens found" subtitle="Tokens in your wallet will appear here" />
+            ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-xs text-gray-400 border-b border-gray-50">
-                      <th className="pb-3 pt-2 px-5 text-left font-medium">Token</th>
-                      <th className="pb-3 pt-2 px-3 text-right font-medium">Price</th>
-                      <th className="pb-3 pt-2 px-3 text-right font-medium hidden md:table-cell">Balance</th>
-                      <th className="pb-3 pt-2 px-3 text-right font-medium">Value</th>
-                      <th className="pb-3 pt-2 px-3 text-right font-medium hidden lg:table-cell">Allocation</th>
+                      <th className="py-3 px-5 text-left font-medium">Token</th>
+                      <th className="py-3 px-3 text-right font-medium">Price</th>
+                      <th className="py-3 px-3 text-right font-medium hidden md:table-cell">Balance</th>
+                      <th className="py-3 px-3 text-right font-medium">Value</th>
+                      <th className="py-3 px-3 text-right font-medium hidden lg:table-cell">Allocation</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
-                    {tokens.map(t => <TokenRow key={t.symbol} token={t} />)}
+                    {tokens.map(token => <TokenRow key={token.symbol} token={token} />)}
                   </tbody>
                 </table>
               </div>
@@ -363,54 +338,25 @@ export default function PortfolioPage() {
                 <ImageIcon size={16} className="text-blue-500" />
                 <h2 className="font-semibold text-gray-800" style={SORA}>NFTs</h2>
                 {nftTotal > 0 && (
-                  <span className="text-xs bg-blue-50 text-blue-500 font-semibold px-2 py-0.5 rounded-full">{nftTotal}</span>
+                  <span className="text-xs bg-blue-100 text-blue-600 font-semibold px-2 py-0.5 rounded-full">{nftTotal}</span>
                 )}
               </div>
-              <div className="flex items-center gap-3">
-                {nftValue > 0 && (
-                  <span className="text-xs text-gray-400 font-medium">{fmtUSD(nftValue)} total floor</span>
-                )}
-                {/* NFT refresh button */}
-                <button
-                  onClick={refresh}
-                  disabled={isLoading}
-                  className="p-1.5 rounded-lg text-gray-400 hover:text-violet-600 hover:bg-violet-50 transition-all disabled:opacity-40"
-                  title="Refresh NFTs"
-                >
-                  <RefreshCw size={13} className={isLoading ? 'animate-spin text-violet-400' : ''} />
-                </button>
-                {nfts.length > 0 && (
-                  <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
-                    <button
-                      onClick={() => setNftView('grid')}
-                      className={`p-1.5 rounded-md transition-all ${nftView === 'grid' ? 'bg-white shadow-sm text-violet-600' : 'text-gray-400 hover:text-gray-600'}`}
-                    >
-                      <LayoutGrid size={13} />
-                    </button>
-                    <button
-                      onClick={() => setNftView('list')}
-                      className={`p-1.5 rounded-md transition-all ${nftView === 'list' ? 'bg-white shadow-sm text-violet-600' : 'text-gray-400 hover:text-gray-600'}`}
-                    >
-                      <List size={13} />
-                    </button>
-                  </div>
-                )}
+              <div className="flex items-center gap-2">
+                <button onClick={() => setNftView('grid')} className={`p-1.5 rounded-lg transition-colors ${nftView === 'grid' ? 'bg-violet-100 text-violet-600' : 'text-gray-400 hover:text-violet-600 hover:bg-violet-50'}`}><LayoutGrid size={14} /></button>
+                <button onClick={() => setNftView('list')} className={`p-1.5 rounded-lg transition-colors ${nftView === 'list' ? 'bg-violet-100 text-violet-600' : 'text-gray-400 hover:text-violet-600 hover:bg-violet-50'}`}><List size={14} /></button>
               </div>
             </div>
 
             <div className="p-5">
               {isLoading && nfts.length === 0 && <NFTGridSkeleton />}
+
+              {/* Fix #14: was linking to etherscan.io/apis — now OpenSea API docs */}
               {!isLoading && nftsNoKey && (
-                <div className="flex flex-col items-center justify-center py-10 gap-3 text-center">
-                  <div className="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center">
-                    <span className="text-amber-400 text-lg">🔑</span>
-                  </div>
-                  <p className="text-sm font-medium text-gray-600">Etherscan API key required</p>
-                  <p className="text-xs text-gray-400 max-w-xs">
-                    Add <code className="bg-gray-100 px-1 rounded text-violet-600 font-mono">ETHERSCAN_API_KEY</code> to your Vercel environment variables to enable NFT detection.
-                  </p>
-                  <a href="https://etherscan.io/apis" target="_blank" rel="noopener noreferrer"
-                    className="text-xs text-violet-500 hover:text-violet-700 underline">Get a free key →</a>
+                <div className="flex flex-col items-center gap-2 py-10 text-center">
+                  <p className="text-sm text-gray-400">OpenSea API key not configured</p>
+                  <p className="text-xs text-gray-300">Add <code className="bg-gray-100 px-1 rounded">OPENSEA_API_KEY</code> to your environment variables</p>
+                  <a href="https://docs.opensea.io/reference/api-keys" target="_blank" rel="noopener noreferrer"
+                    className="text-xs text-violet-500 hover:text-violet-700 underline">Get an OpenSea API key →</a>
                 </div>
               )}
               {!isLoading && !nftsNoKey && nfts.length === 0 && (
@@ -429,11 +375,12 @@ export default function PortfolioPage() {
                 </div>
               )}
 
+              {/* Fix #1: was magiceden.io/wallet — now OpenSea */}
               {nftTotal > 50 && (
                 <p className="text-xs text-gray-400 text-center mt-4 pt-4 border-t border-gray-50">
                   Showing 50 of {nftTotal} NFTs ·{' '}
-                  <a href={`https://magiceden.io/wallet/${address}?chain=monad`} target="_blank" rel="noopener noreferrer"
-                    className="text-violet-500 hover:text-violet-700">View all on Magic Eden</a>
+                  <a href={`https://opensea.io/account?chain=monad`} target="_blank" rel="noopener noreferrer"
+                    className="text-violet-500 hover:text-violet-700">View all on OpenSea</a>
                 </p>
               )}
             </div>

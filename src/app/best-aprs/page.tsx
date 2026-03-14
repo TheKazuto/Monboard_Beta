@@ -4,19 +4,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { RefreshCw, ExternalLink, TrendingUp, Zap, Layers, BookOpen, Coins } from 'lucide-react'
 import { SORA } from '@/lib/styles'
 import AdBanner from '@/components/AdBanner'
-
-// Duplicated from api/best-aprs/route.ts to avoid importing server-only module
-interface AprEntry {
-  protocol:   string
-  logo:       string
-  url:        string
-  tokens:     string[]
-  label:      string
-  apr:        number
-  tvl:        number
-  type:       'pool' | 'vault' | 'lend'
-  isStable:   boolean
-}
+// Fix #13: import AprEntry from shared types — eliminates duplication with api/best-aprs/route.ts
+import type { AprEntry } from '@/types/apr'
 
 // ─── Auto-refresh interval ────────────────────────────────────────────────────
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000  // 5 minutes
@@ -90,7 +79,11 @@ function AprCard({ entry, rank, showType = false }: { entry: AprEntry; rank: num
           <TokenPills tokens={entry.tokens} />
           {entry.tvl > 0 && (
             <span className="text-xs text-gray-400 font-medium">
-              TVL ${entry.tvl >= 1_000_000 ? `${(entry.tvl / 1_000_000).toFixed(1)}M` : entry.tvl >= 1_000 ? `${(entry.tvl / 1_000).toFixed(0)}K` : entry.tvl.toFixed(0)}
+              TVL ${entry.tvl >= 1_000_000
+                ? `${(entry.tvl / 1_000_000).toFixed(1)}M`
+                : entry.tvl >= 1_000
+                  ? `${(entry.tvl / 1_000).toFixed(0)}K`
+                  : entry.tvl.toFixed(0)}
             </span>
           )}
         </div>
@@ -177,13 +170,13 @@ interface AprData {
 
 function categorize(entries: AprEntry[]): AprData {
   const stableAPRs: AprEntry[] = []
-  const pools: AprEntry[] = []
-  const vaults: AprEntry[] = []
-  const lends: AprEntry[] = []
+  const pools:      AprEntry[] = []
+  const vaults:     AprEntry[] = []
+  const lends:      AprEntry[] = []
 
   for (const e of entries) {
     if (e.isStable) { stableAPRs.push(e); continue }
-    if (e.type === 'pool')  pools.push(e)
+    if (e.type === 'pool')       pools.push(e)
     else if (e.type === 'vault') vaults.push(e)
     else if (e.type === 'lend')  lends.push(e)
   }
@@ -193,7 +186,7 @@ function categorize(entries: AprEntry[]): AprData {
     pools:      pools.slice(0, 10),
     vaults:     vaults.slice(0, 10),
     lends:      lends.slice(0, 10),
-    lastUpdated: Date.now(),
+    lastUpdated:  Date.now(),
     totalEntries: entries.length,
   }
 }
@@ -212,80 +205,72 @@ export default function BestAprsPage() {
       const res = await fetch('/api/best-aprs', { cache: 'no-store' })
       if (res.ok) {
         const json = await res.json()
-        // API returns { stableAPRs, pools, vaults, lends, ... } or a flat array
         if (Array.isArray(json)) {
           setData(categorize(json))
         } else if (json.pools || json.vaults || json.lends || json.stableAPRs) {
           setData({
-            stableAPRs:   json.stableAPRs ?? [],
-            pools:        json.pools ?? [],
-            vaults:       json.vaults ?? [],
-            lends:        json.lends ?? [],
-            lastUpdated:  json.lastUpdated ?? Date.now(),
-            totalEntries: json.totalEntries ?? 0,
+            stableAPRs:   json.stableAPRs   ?? [],
+            pools:        json.pools         ?? [],
+            vaults:       json.vaults        ?? [],
+            lends:        json.lends         ?? [],
+            lastUpdated:  json.lastUpdated   ?? Date.now(),
+            totalEntries: json.totalEntries  ?? 0,
           })
         }
         setLastLoaded(new Date())
+        lastFetchRef.current = Date.now()
+        setCountdown(REFRESH_INTERVAL_MS / 1000)
       }
-    } catch { /* keep previous data */ } finally {
+    } catch {
+      // keeps previous data on error
+    } finally {
       setLoading(false)
-      lastFetchRef.current = Date.now()
     }
   }, [])
 
-  // Single interval: handles both auto-refresh and countdown display
   useEffect(() => {
     fetchData()
+  }, [fetchData])
+
+  // Countdown timer
+  useEffect(() => {
     timerRef.current = setInterval(() => {
       const elapsed = Date.now() - lastFetchRef.current
-      const remaining = Math.max(0, Math.ceil((REFRESH_INTERVAL_MS - elapsed) / 1000))
+      const remaining = Math.max(0, Math.round((REFRESH_INTERVAL_MS - elapsed) / 1000))
       setCountdown(remaining)
-      if (remaining <= 0) {
-        lastFetchRef.current = Date.now()
-        fetchData()
-      }
+      if (remaining === 0) fetchData()
     }, 1000)
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [fetchData])
 
-  // Manual refresh resets the timer
-  const handleRefresh = useCallback(() => {
-    lastFetchRef.current = Date.now()
-    setCountdown(REFRESH_INTERVAL_MS / 1000)
-    fetchData()
-  }, [fetchData])
-
-  const fmtCountdown = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
-
   return (
-    <div className="page-content max-w-6xl mx-auto px-4 py-6">
-
-      {/* ── Page Header ── */}
-      <div className="flex items-start justify-between mb-8 gap-4">
+    <div className="max-w-7xl mx-auto px-4 py-6">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900 mb-1" style={SORA}>
-            Best APRs
-          </h1>
-          <p className="text-gray-400 text-sm">
-            The best APRs in the Monad ecosystem.
+          <h1 className="font-bold text-2xl text-gray-900" style={SORA}>Best APRs</h1>
+          <p className="text-gray-500 text-sm mt-1">
+            Top yield opportunities across the Monad ecosystem
+            {lastLoaded && (
+              <span className="ml-2 text-gray-400">· Updated {lastLoaded.toLocaleTimeString()}</span>
+            )}
           </p>
-          {lastLoaded && (
-            <p className="text-xs text-gray-300 mt-1">
-              Updated {lastLoaded.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-              {!loading && (
-                <span className="ml-2 text-violet-300">· next refresh in {fmtCountdown(countdown)}</span>
-              )}
-            </p>
-          )}
         </div>
-        <button
-          onClick={handleRefresh}
-          disabled={loading}
-          className="btn-primary flex items-center gap-2 text-sm py-2 px-4 disabled:opacity-60 shrink-0"
-        >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          {loading ? 'Loading...' : 'Refresh'}
-        </button>
+        <div className="flex items-center gap-3">
+          {!loading && (
+            <span className="text-xs text-gray-400">
+              Refreshing in {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
+            </span>
+          )}
+          <button
+            onClick={fetchData}
+            disabled={loading}
+            className="flex items-center gap-1.5 btn-primary text-xs px-4 py-2 disabled:opacity-50"
+          >
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+            {loading ? 'Loading...' : 'Refresh'}
+          </button>
+        </div>
       </div>
 
       {/* ── Stats bar ── */}
@@ -315,9 +300,9 @@ export default function BestAprsPage() {
       {/* ── Grid of sections ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-        {/* ── LEFT COLUMN: Stablecoin + Ad ── */}
+        {/* ── LEFT COLUMN: Stablecoin + AdsTerra banner ── */}
         <div className="flex flex-col gap-6">
-          {/* ── 1. Trending Stable APR (5 positions) ── */}
+          {/* ── 1. Trending Stable APR ── */}
           <div className="card p-5">
             <SectionHeader
               icon={<Coins size={18} className="text-emerald-600" />}
@@ -335,7 +320,7 @@ export default function BestAprsPage() {
             }
           </div>
 
-          {/* ── Google Ad slot — fills remaining space to align with Trending Pools ── */}
+          {/* ── AdsTerra banner slot ── */}
           <AdBanner className="flex-1 min-h-[250px]" />
         </div>
 
