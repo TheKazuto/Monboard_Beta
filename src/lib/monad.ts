@@ -1,13 +1,9 @@
 /**
- * monad.ts — shared utilities for Monad Mainnet RPC and CoinGecko price fetching.
+ * monad.ts — shared utilities for Monad Mainnet RPC.
  *
- * Centralises:
- *  - MONAD_RPC constant (was repeated in 5 API routes)
- *  - rpcBatch() helper (was copied into defi, nfts, token-exposure routes)
- *  - KNOWN_TOKENS list (was duplicated between token-exposure and portfolio-history,
- *    with a coingeckoId inconsistency for WBTC)
- *  - getMonPrice() with a 60-second in-memory cache (eliminates duplicate
- *    CoinGecko calls from /api/defi and /api/nfts firing in parallel)
+ * CoinGecko price fetching has been moved to lib/priceCache.ts.
+ * getMonPrice() here is now a thin re-export that delegates to priceCache,
+ * keeping backward compatibility with all existing call sites.
  */
 
 // ─── RPC ─────────────────────────────────────────────────────────────────────
@@ -16,8 +12,8 @@ export const MONAD_RPC = 'https://rpc.monad.xyz'
 
 /**
  * Send a JSON-RPC batch to the Monad node.
- * @param calls  Array of JSON-RPC call objects
- * @param timeoutMs  AbortSignal timeout in ms (default 15 000)
+ * @param calls     Array of JSON-RPC call objects
+ * @param timeoutMs AbortSignal timeout in ms (default 15 000)
  */
 export async function rpcBatch(calls: object[], timeoutMs = 15_000): Promise<any[]> {
   if (!calls.length) return []
@@ -50,9 +46,6 @@ export function buildBalanceOfCall(
 }
 
 // ─── KNOWN_TOKENS ─────────────────────────────────────────────────────────────
-// Single authoritative list used by both /api/token-exposure and
-// /api/portfolio-history (previously two copies with a WBTC coingeckoId
-// inconsistency: 'bitcoin' vs 'wrapped-bitcoin').
 
 export interface KnownToken {
   symbol:      string
@@ -77,7 +70,7 @@ export const KNOWN_TOKENS: KnownToken[] = [
     name:        'Wrapped ETH',
     contract:    '0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242',
     decimals:    18,
-    coingeckoId: 'weth',
+    coingeckoId: 'ethereum',
     color:       '#627EEA',
   },
   {
@@ -114,41 +107,9 @@ export const KNOWN_TOKENS: KnownToken[] = [
   },
 ]
 
-// ─── MON price (shared, cached) ───────────────────────────────────────────────
-// Eliminates duplicate CoinGecko calls when /api/defi and /api/nfts are
-// triggered in parallel (e.g. on wallet connect via PortfolioContext).
+// ─── MON price ────────────────────────────────────────────────────────────────
+// Delegated to lib/priceCache.ts — no longer calls CoinGecko directly.
+// The shared 5-minute cache in priceCache eliminates duplicate calls from
+// /api/defi, /api/nfts, /api/mon-price all firing concurrently.
 
-interface PriceEntry {
-  price:     number
-  fetchedAt: number
-}
-
-const MON_PRICE_TTL = 60_000 // 60 seconds
-let monPriceCache: PriceEntry | null = null
-
-/**
- * Fetch the current MON/USD price from CoinGecko.
- * Results are cached for 60 seconds so concurrent route handlers
- * (e.g. /api/defi + /api/nfts firing in parallel) share one upstream call.
- */
-export async function getMonPrice(): Promise<number> {
-  const now = Date.now()
-  if (monPriceCache && now - monPriceCache.fetchedAt < MON_PRICE_TTL) {
-    return monPriceCache.price
-  }
-  try {
-    const apiKey   = process.env.COINGECKO_API_KEY
-    const cgHeaders: Record<string, string> = { Accept: 'application/json' }
-    if (apiKey) cgHeaders['x-cg-demo-api-key'] = apiKey
-    const res = await fetch(
-      'https://api.coingecko.com/api/v3/simple/price?ids=monad&vs_currencies=usd',
-      { headers: cgHeaders, cache: 'no-store' },
-    )
-    const d     = await res.json()
-    const price = (d?.monad?.usd as number) ?? 0
-    monPriceCache = { price, fetchedAt: now }
-    return price
-  } catch {
-    return monPriceCache?.price ?? 0
-  }
-}
+export { getMonPrice } from '@/lib/priceCache'

@@ -1,16 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { KNOWN_TOKENS, rpcBatch, buildBalanceOfCall } from '@/lib/monad'
+import { cached } from '@/lib/serverCache'
 
 export const revalidate = 0
 
-// ─── Balance fetching (single RPC batch) ─────────────────────────────────────
-// Previously: 1 individual fetch per token + 1 for native = 6 HTTP requests.
-// Now: one JSON-RPC batch call returns all balances in a single round-trip.
-
-async function fetchAllBalances(address: string): Promise<{
-  native: number
-  tokens: number[]
-}> {
+// ─── Balance fetching ─────────────────────────────────────────────────────────
+async function fetchAllBalances(address: string): Promise<{ native: number; tokens: number[] }> {
   const nativeCall = {
     jsonrpc: '2.0',
     method:  'eth_getBalance',
@@ -39,45 +34,42 @@ async function fetchAllBalances(address: string): Promise<{
   }
 }
 
-// ─── Price history ────────────────────────────────────────────────────────────
+// ─── Price history — cached per (coinId, days) — 2h TTL ──────────────────────
+// Historical daily prices are identical for all users requesting the same
+// coinId+days combination. Cache prevents N users → N CoinGecko calls.
+// 2 hours is safe: daily candles don't change retroactively.
+const HISTORY_TTL = 2 * 60 * 60 * 1000 // 2 hours
 
 async function fetchPriceHistory(coinId: string, days: number): Promise<[number, number][]> {
-  try {
-    // Fix #18 (INFO): Uses COINGECKO_API_KEY (server-only, no NEXT_PUBLIC_ prefix).
-    // Consistent with top-tokens/route.ts after fix #11.
-    const apiKey   = process.env.COINGECKO_API_KEY
-    const cgHeaders: Record<string, string> = { Accept: 'application/json' }
-    if (apiKey) cgHeaders['x-cg-demo-api-key'] = apiKey
-    const url      = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=${days}&interval=daily`
-    const res      = await fetch(url, { headers: cgHeaders, cache: 'no-store' })
-    const data     = await res.json()
-    return data?.prices ?? []
-  } catch {
-    return []
-  }
+  return cached(`price-history:${coinId}:${days}`, async () => {
+    const apiKey  = process.env.COINGECKO_API_KEY
+    const headers: Record<string, string> = { Accept: 'application/json' }
+    if (apiKey) headers['x-cg-demo-api-key'] = apiKey
+
+    const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=${days}&interval=daily`
+    const res = await fetch(url, { headers, cache: 'no-store', signal: AbortSignal.timeout(10_000) })
+    if (!res.ok) throw new Error(`CoinGecko market_chart ${res.status}`)
+    const data = await res.json()
+    return (data?.prices ?? []) as [number, number][]
+  }, HISTORY_TTL)
 }
 
-// ─── Handler ─────────────────────────────────────────────────────────────────
-
+// ─── Handler ──────────────────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address')
 
-  // Fix #8 (MÉDIO): Restrict `days` to a safe allowlist.
-  // Previously, parseInt() returned NaN/-1/999999 for malformed values,
-  // which were passed directly to the CoinGecko API causing unexpected behavior.
   const VALID_DAYS = new Set([7, 30, 90, 180, 365])
-  const rawDays   = parseInt(req.nextUrl.searchParams.get('days') ?? '30', 10)
-  const days      = VALID_DAYS.has(rawDays) ? rawDays : 30
+  const rawDays    = parseInt(req.nextUrl.searchParams.get('days') ?? '30', 10)
+  const days       = VALID_DAYS.has(rawDays) ? rawDays : 30
 
   if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
     return NextResponse.json({ error: 'Invalid address' }, { status: 400 })
   }
 
   try {
-    // ── 1. Fetch all current balances in a single RPC batch ───────────────────
+    // ── 1. Fetch balances ─────────────────────────────────────────────────────
     const { native: monBalance, tokens: tokenBalances } = await fetchAllBalances(address)
 
-    // Build coingeckoId → balance (only non-zero)
     const balances: Record<string, number> = {}
     if (monBalance > 0.0001) balances['monad'] = monBalance
     KNOWN_TOKENS.forEach((t, i) => {
@@ -85,12 +77,11 @@ export async function GET(req: NextRequest) {
     })
 
     const heldCoinIds = Object.keys(balances)
-
     if (heldCoinIds.length === 0) {
       return NextResponse.json({ history: [], totalValue: 0, change: 0 })
     }
 
-    // ── 2. Fetch price history for each held coin ─────────────────────────────
+    // ── 2. Fetch price histories (cached per coin+days, shared across users) ──
     const priceHistories = await Promise.all(
       heldCoinIds.map(id => fetchPriceHistory(id, days))
     )
@@ -101,7 +92,6 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ history: [], totalValue: 0, change: 0 })
     }
 
-    // coinId → Map<dateStr, price>
     const priceMaps = new Map<string, Map<string, number>>()
     heldCoinIds.forEach((id, i) => {
       const map = new Map<string, number>()

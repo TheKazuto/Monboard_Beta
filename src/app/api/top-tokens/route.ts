@@ -3,12 +3,13 @@ import { cached } from '@/lib/serverCache'
 
 export const dynamic = 'force-dynamic'
 
-const CACHE_TTL = 60_000 // 60 seconds
+// Increased from 60s to 5 minutes — market cap rankings don't change every minute.
+const CACHE_TTL = 5 * 60 * 1000
 
 export async function GET() {
   try {
     const data = await cached('top-tokens', async () => {
-      const apiKey   = process.env.COINGECKO_API_KEY
+      const apiKey  = process.env.COINGECKO_API_KEY
       const headers: Record<string, string> = { Accept: 'application/json' }
       if (apiKey) headers['x-cg-demo-api-key'] = apiKey
 

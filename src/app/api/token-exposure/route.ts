@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { KNOWN_TOKENS, rpcBatch, buildBalanceOfCall } from '@/lib/monad'
+import { getAllPrices } from '@/lib/priceCache'
 
 export const revalidate = 0
 
@@ -11,24 +12,26 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // ── 1. Fetch MON native balance + all ERC-20 balances in parallel ──────────
-    const erc20Calls = KNOWN_TOKENS.map((t) =>
-      buildBalanceOfCall(t.contract, address)
-    )
+    // ── 1. Fetch MON native balance + all ERC-20 balances (single RPC batch) ──
+    const erc20Calls = KNOWN_TOKENS.map((t) => buildBalanceOfCall(t.contract, address))
     const nativeCall = {
       jsonrpc: '2.0',
-      method: 'eth_getBalance',
-      params: [address, 'latest'],
-      id: 'native',
+      method:  'eth_getBalance',
+      params:  [address, 'latest'],
+      id:      'native',
     }
 
-    // Batch native balance + all ERC-20 balanceOf in a single RPC request
-    const allCalls = [nativeCall, ...erc20Calls]
-    const allResults = await rpcBatch(allCalls)
-    const nativeRes       = allResults[0]
-    const erc20Responses  = allResults.slice(1)
+    // ── 2. Fetch prices from shared cache in parallel with RPC ────────────────
+    // getAllPrices() reads the 5-minute shared cache — no CoinGecko call unless expired.
+    const [allResults, priceData] = await Promise.all([
+      rpcBatch([nativeCall, ...erc20Calls]),
+      getAllPrices(),
+    ])
 
-    // ── 2. Parse raw balances ──────────────────────────────────────────────────
+    const nativeRes      = allResults[0]
+    const erc20Responses = allResults.slice(1)
+
+    // ── 3. Parse balances ─────────────────────────────────────────────────────
     const rawMON = nativeRes?.result
       ? Number(BigInt(nativeRes.result)) / 1e18
       : 0
@@ -40,100 +43,53 @@ export async function GET(req: NextRequest) {
       return { ...token, balance }
     })
 
-    // ── 3. Fetch prices + images from CoinGecko (free, no key) ────────────────
-    const coinIds = [
-      'monad', // MON native
-      ...KNOWN_TOKENS.map((t) => t.coingeckoId),
-    ].join(',')
-
-    let prices: Record<string, number> = {}
-    let images: Record<string, string> = {}
-    try {
-      // /coins/markets returns both current_price and image in a single call —
-      // no need for a separate /simple/price request (Fix #6).
-      const apiKey   = process.env.COINGECKO_API_KEY
-      const cgHeaders: Record<string, string> = { Accept: 'application/json' }
-      if (apiKey) cgHeaders['x-cg-demo-api-key'] = apiKey
-      const marketRes = await fetch(
-        `https://api.coingecko.com/api/v3/coins/markets?ids=${coinIds}&vs_currency=usd&per_page=20`,
-        { headers: cgHeaders, cache: 'no-store' }
-      )
-      const marketData = await marketRes.json()
-      if (Array.isArray(marketData)) {
-        for (const coin of marketData) {
-          if (coin.id) {
-            prices[coin.id] = coin.current_price ?? 0
-            if (coin.image) images[coin.id] = coin.image
-          }
-        }
-      }
-    } catch {
-      // fallback prices if CoinGecko fails
-      prices = {
-        monad: 0.02,
-        'usd-coin': 1.0,
-        weth: 2300,
-        tether: 1.0,
-        'wrapped-bitcoin': 85000,
-        'agora-dollar': 1.0,
-      }
-    }
-
-    // ── 4. Calculate USD values ────────────────────────────────────────────────
-    const monPrice = prices['monad'] ?? 0.02
+    // ── 4. Build token list with USD values ───────────────────────────────────
+    const { prices, images } = priceData
+    const monPrice = prices['monad'] ?? 0
     const monValue = rawMON * monPrice
 
     const tokens: {
-      symbol: string
-      name: string
-      balance: number
-      price: number
-      value: number
-      color: string
-      imageUrl: string
+      symbol: string; name: string; balance: number
+      price: number; value: number; color: string; imageUrl: string
     }[] = []
 
-    // Add MON native
     if (rawMON > 0.0001) {
       tokens.push({
-        symbol: 'MON',
-        name: 'Monad',
-        balance: rawMON,
-        price: monPrice,
-        value: monValue,
-        color: '#836EF9',
+        symbol:   'MON',
+        name:     'Monad',
+        balance:  rawMON,
+        price:    monPrice,
+        value:    monValue,
+        color:    '#836EF9',
         imageUrl: images['monad'] ?? '',
       })
     }
 
-    // Add ERC-20 tokens with balance > dust
     for (const token of tokenBalances) {
       const price = prices[token.coingeckoId] ?? 0
       const value = token.balance * price
       if (token.balance > 0.0001 || value > 0.01) {
         tokens.push({
-          symbol: token.symbol,
-          name: token.name,
-          balance: token.balance,
+          symbol:   token.symbol,
+          name:     token.name,
+          balance:  token.balance,
           price,
           value,
-          color: token.color,
+          color:    token.color,
           imageUrl: images[token.coingeckoId] ?? '',
         })
       }
     }
 
-    // ── 5. Sort by value desc + compute percentages ───────────────────────────
+    // ── 5. Sort + percentages ─────────────────────────────────────────────────
     tokens.sort((a, b) => b.value - a.value)
     const totalValue = tokens.reduce((sum, t) => sum + t.value, 0)
 
-    const result = tokens.map((t) => ({
-      ...t,
-      percentage: totalValue > 0 ? (t.value / totalValue) * 100 : 0,
-    }))
-
     return NextResponse.json({
-      tokens: result,
+      tokens: tokens.map(t => ({
+        ...t,
+        percentage: totalValue > 0 ? (t.value / totalValue) * 100 : 0,
+      })),
       totalValue,
       address,
     })
