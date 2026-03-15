@@ -11,11 +11,6 @@ import { encodeFunctionData } from 'viem'
 import { SORA } from '@/lib/styles'
 
 // ─── INTEGRATOR CONFIG ────────────────────────────────────────────────────────
-// Set NEXT_PUBLIC_FEE_RECEIVER in .env.local to your wallet address to earn 0.2% swap fees
-// Leave unset to disable fee collection (swap will still work normally)
-// Fix #10 (MÉDIO): Removed the hardcoded fallback wallet address.
-// When NEXT_PUBLIC_FEE_RECEIVER is not set, fee collection is simply disabled.
-// This prevents the developer's wallet address from appearing in the public bundle.
 const FEE_RECEIVER = process.env.NEXT_PUBLIC_FEE_RECEIVER ?? ''
 const FEE_PERCENT  = 0.2
 const REFERRER     = 'monboard'
@@ -24,8 +19,8 @@ const NATIVE       = '0x0000000000000000000000000000000000000000'
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 interface Chain {
   id:   number
-  name: string       // "ETH", "MONAD", etc — used in Rubic API
-  type: string       // "EVM", "SOLANA", etc
+  name: string
+  type: string
 }
 
 interface Token {
@@ -38,8 +33,6 @@ interface Token {
 }
 
 // ─── CHAIN DISPLAY HELPERS ───────────────────────────────────────────────────
-// Map Rubic chain name → CoinGecko token list platform slug
-// tokens.coingecko.com/{platform}/all.json — free, no API key, logos included
 const COINGECKO_PLATFORM: Record<string, string> = {
   ETH:       'ethereum',
   BSC:       'binance-smart-chain',
@@ -72,7 +65,7 @@ const COINGECKO_PLATFORM: Record<string, string> = {
   BLAST:     'blast',
   METIS:     'metis-andromeda',
   ZK_FAIR:   'zkfair',
-  MONAD:     'monad',   // served via GeckoTerminal (not CoinGecko token list)
+  MONAD:     'monad',
 }
 
 // ─── LOGO CDN SOURCES ────────────────────────────────────────────────────────
@@ -80,7 +73,6 @@ const TW_BASE  = 'https://raw.githubusercontent.com/trustwallet/assets/master/bl
 const UNI_BASE = 'https://raw.githubusercontent.com/Uniswap/assets/master/blockchains'
 const LLAMA    = 'https://icons.llamao.fi/icons/chains'
 
-// DefiLlama slugs — 100% coverage confirmed (ETH, BSC, Monad, zkSync, Avalanche, all chains)
 const LLAMA_SLUG: Record<string, string> = {
   ETH: 'ethereum',       BSC: 'binance',          POLYGON: 'polygon',
   ARBITRUM: 'arbitrum',  OPTIMISM: 'optimism',     BASE: 'base',
@@ -96,7 +88,6 @@ const LLAMA_SLUG: Record<string, string> = {
   ROOTSTOCK: 'rootstock', FLARE: 'flare',          TELOS: 'telos',
 }
 
-// TrustWallet slugs — fallback (AVALANCHE missing, ZKSYNC uses wrong slug)
 const TW_CHAIN_SLUG: Record<string, string> = {
   ETH: 'ethereum',   BSC: 'smartchain', POLYGON: 'polygon',
   ARBITRUM: 'arbitrum', OPTIMISM: 'optimism', BASE: 'base',
@@ -108,7 +99,6 @@ const TW_CHAIN_SLUG: Record<string, string> = {
   MONAD: 'monad',
 }
 
-// CoinGecko CDN overrides for well-known tokens by symbol
 const CG = 'https://assets.coingecko.com/coins/images'
 const OVERRIDE_LOGOS: Record<string, string> = {
   ETH:  `${CG}/279/small/ethereum.png`,
@@ -122,7 +112,6 @@ const OVERRIDE_LOGOS: Record<string, string> = {
   MATIC:`${CG}/4713/small/polygon-ecosystem-token.png`,
   AVAX: `${CG}/12559/small/Avalanche_Circle_RedWhite_Trans.png`,
   SOL:  `${CG}/4128/small/solana.png`,
-  // Monad - use the official purple M logo from their brand kit / TW chain logo
   MON:  `https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/monad/info/logo.png`,
   WMON: `https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/monad/info/logo.png`,
   ARB:  `${CG}/16547/small/arb.jpg`,
@@ -153,45 +142,30 @@ const OVERRIDE_LOGOS: Record<string, string> = {
   TIA:  `${CG}/31967/small/celestia.jpg`,
 }
 
-// Build ordered list of logo URLs to try for a token
 function buildLogoUrls(token: Token, chainName: string): string[] {
   const urls: string[] = []
-  const symUpper = token.symbol.toUpperCase()
+  const symUpper = (token.symbol ?? '').toUpperCase()
   const addr = token.address
   const isNative = addr === NATIVE
 
-  // 1. Symbol override (CoinGecko CDN for well-known tokens) — most reliable
   if (OVERRIDE_LOGOS[symUpper]) urls.push(OVERRIDE_LOGOS[symUpper])
 
-  // 2. logoURI from the token list (CoinGecko token list or GeckoTerminal image_url)
   if (token.logoURI && token.logoURI !== '' && !token.logoURI.includes('missing')) {
     urls.push(token.logoURI)
   }
 
-  // Skip address-based CDNs for native tokens (address is 0x000...000)
   if (!isNative && addr && addr.length === 42) {
     const twSlug = TW_CHAIN_SLUG[chainName]
-
-    // 3. 1inch token logo CDN — covers ETH, BSC, Polygon, Arbitrum, Optimism, Base etc.
-    // Massive coverage: ~100k tokens, just needs lowercase address
     urls.push(`https://tokens.1inch.io/${addr.toLowerCase()}.png`)
-
-    // 4. TrustWallet by contract address
     if (twSlug) {
       urls.push(`${TW_BASE}/${twSlug}/assets/${addr}/logo.png`)
-    }
-
-    // 5. Uniswap assets repo
-    if (twSlug) {
       urls.push(`${UNI_BASE}/${twSlug}/assets/${addr}/logo.png`)
     }
   }
 
-  // Deduplicate while preserving order
   return [...new Set(urls.filter(Boolean))]
 }
 
-// Native tokens per chain
 const NATIVE_TOKENS: Record<string, Token> = {
   ETH:       { symbol: 'ETH',  name: 'Ethereum',  address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.ETH },
   BSC:       { symbol: 'BNB',  name: 'BNB',       address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.BNB },
@@ -205,7 +179,6 @@ const NATIVE_TOKENS: Record<string, Token> = {
   FANTOM:    { symbol: 'FTM',  name: 'Fantom',    address: NATIVE, decimals: 18, logoURI: OVERRIDE_LOGOS.FTM },
 }
 
-// Returns ordered list of URLs to try for a chain logo
 function chainLogoUrls(chainName: string): string[] {
   const urls: string[] = []
   const llamaSlug = LLAMA_SLUG[chainName]
@@ -214,13 +187,11 @@ function chainLogoUrls(chainName: string): string[] {
   if (twSlug) urls.push(`${TW_BASE}/${twSlug}/info/logo.png`)
   return urls
 }
-// Kept for chain selectors that pass src= directly (single URL compat)
 function chainLogoUrl(chainName: string): string {
   return chainLogoUrls(chainName)[0] ?? ''
 }
 
 // ─── IMAGE WITH MULTI-SOURCE FALLBACK ────────────────────────────────────────
-// Inner component — receives a fixed urls array and tries each in sequence
 function TokenImageInner({ urls, symbol, size }: { urls: string[]; symbol: string; size: number }) {
   const [idx, setIdx] = useState(0)
 
@@ -228,10 +199,10 @@ function TokenImageInner({ urls, symbol, size }: { urls: string[]; symbol: strin
     <div className="rounded-full flex items-center justify-center text-white font-bold shrink-0"
       style={{
         width: size, height: size,
-        background: `hsl(${((([...symbol].reduce((h,c) => c.charCodeAt(0)+((h<<5)-h),0)) % 360)+360)%360}, 60%, 50%)`,
+        background: `hsl(${((([...(symbol || '?')].reduce((h,c) => c.charCodeAt(0)+((h<<5)-h),0)) % 360)+360)%360}, 60%, 50%)`,
         fontSize: size * 0.38
       }}>
-      {symbol.slice(0, 2).toUpperCase()}
+      {(symbol || '?').slice(0, 2).toUpperCase()}
     </div>
   )
 
@@ -251,7 +222,6 @@ function TokenImageInner({ urls, symbol, size }: { urls: string[]; symbol: strin
   )
 }
 
-// Outer wrapper — uses `key` to force full remount (and idx reset) when token changes
 function TokenImage({
   token, chainName, src, symbol, size = 28
 }: {
@@ -263,8 +233,7 @@ function TokenImage({
 }
 
 // ─── API HELPERS ──────────────────────────────────────────────────────────────
-// Cache for token lists with TTL — avoid re-fetching same chain within session
-const TOKEN_CACHE_TTL = 5 * 60 * 1000  // 5 minutes
+const TOKEN_CACHE_TTL = 5 * 60 * 1000
 const tokenListCache: Record<string, { tokens: Token[]; ts: number }> = {}
 
 async function loadTokensForChain(chainName: string): Promise<Token[]> {
@@ -275,7 +244,6 @@ async function loadTokensForChain(chainName: string): Promise<Token[]> {
   const platform = COINGECKO_PLATFORM[chainName]
 
   if (!platform) {
-    // Chain not mapped yet — return just native token
     const result = native ? [native] : []
     tokenListCache[chainName] = { tokens: result, ts: Date.now() }
     return result
@@ -286,11 +254,16 @@ async function loadTokensForChain(chainName: string): Promise<Token[]> {
     if (!res.ok) throw new Error('failed')
     const data: { tokens: Token[] } = await res.json()
 
-    // Apply logo overrides for known tokens, add native first
-    const tokens = data.tokens.map(t => ({
-      ...t,
-      logoURI: OVERRIDE_LOGOS[t.symbol.toUpperCase()] ?? t.logoURI,
-    }))
+    // PATCH 1: filter out tokens with missing required fields, then sanitize
+    const tokens = data.tokens
+      .filter(t => t.address && t.symbol)
+      .map(t => ({
+        ...t,
+        symbol:  t.symbol  ?? '',
+        name:    t.name    ?? t.symbol ?? '',
+        address: t.address ?? '',
+        logoURI: OVERRIDE_LOGOS[(t.symbol ?? '').toUpperCase()] ?? t.logoURI ?? '',
+      }))
 
     const result = native ? [native, ...tokens] : tokens
     tokenListCache[chainName] = { tokens: result, ts: Date.now() }
@@ -302,8 +275,6 @@ async function loadTokensForChain(chainName: string): Promise<Token[]> {
   }
 }
 
-// Fetch all supported chains from Rubic
-// Module-level cache — list is static per session, no need to re-fetch on navigation
 let cachedChains: Chain[] | null = null
 
 async function loadChains(): Promise<Chain[]> {
@@ -312,7 +283,6 @@ async function loadChains(): Promise<Chain[]> {
     const res = await fetch('https://api-v2.rubic.exchange/api/info/chains?includeTestnets=false')
     if (!res.ok) throw new Error('failed')
     const data: Chain[] = await res.json()
-    // Filter to EVM + Solana, exclude testnets, sort by familiarity
     const priority = ['ETH','BSC','POLYGON','ARBITRUM','OPTIMISM','BASE','AVALANCHE','MONAD','SOLANA','FANTOM']
     cachedChains = data
       .filter(c => !c.name.includes('TEST') && ['EVM','SOLANA','TON','BITCOIN'].includes(c.type))
@@ -326,44 +296,39 @@ async function loadChains(): Promise<Chain[]> {
       })
     return cachedChains
   } catch {
-    // Fallback to minimal list — do NOT cache fallback so next mount can retry
     return [
-      { id: 1, name: 'ETH', type: 'EVM' },
-      { id: 56, name: 'BSC', type: 'EVM' },
-      { id: 137, name: 'POLYGON', type: 'EVM' },
+      { id: 1,     name: 'ETH',      type: 'EVM' },
+      { id: 56,    name: 'BSC',      type: 'EVM' },
+      { id: 137,   name: 'POLYGON',  type: 'EVM' },
       { id: 42161, name: 'ARBITRUM', type: 'EVM' },
-      { id: 10, name: 'OPTIMISM', type: 'EVM' },
-      { id: 8453, name: 'BASE', type: 'EVM' },
-      { id: 43114, name: 'AVALANCHE', type: 'EVM' },
-      { id: 143, name: 'MONAD', type: 'EVM' },
+      { id: 10,    name: 'OPTIMISM', type: 'EVM' },
+      { id: 8453,  name: 'BASE',     type: 'EVM' },
+      { id: 43114, name: 'AVALANCHE',type: 'EVM' },
+      { id: 143,   name: 'MONAD',    type: 'EVM' },
     ]
   }
 }
 
-// Default slippage tolerance per swap type (in %)
-const SLIPPAGE_ON_CHAIN  = 1    // 1% for same-chain DEX swaps
-const SLIPPAGE_CROSS     = 2    // 2% for cross-chain bridges
+const SLIPPAGE_ON_CHAIN = 1
+const SLIPPAGE_CROSS    = 2
 
 interface Quote {
   id: string
   estimate: {
-    destinationTokenAmount: string   // may be human-readable OR wei — we handle both
+    destinationTokenAmount: string
     destinationUsdAmount: number
     durationInMinutes: number
     priceImpact: number | null
   }
   fees: { gasTokenFees: { protocol: { fixedUsdAmount: number } } }
-  // Rubic v2 uses different field names depending on route type
-  provider?:     string   // on-chain routes
-  type?:         string   // alternative field name
-  providerType?: string   // another alternative
-  tradeType?:    string   // yet another alternative
+  provider?:     string
+  type?:         string
+  providerType?: string
+  tradeType?:    string
 }
 
-// ── Shared fee payload — evaluated once at module load ───────────────────────
 const FEE_PARTS = FEE_RECEIVER ? { fee: FEE_PERCENT, feeTarget: FEE_RECEIVER } : {}
 
-// Builds the common fields shared by both quoteBest and swap endpoints
 function buildRubicBody(
   srcChain: string, srcToken: Token, srcAmount: string,
   dstChain: string, dstToken: Token, slippageTolerance: number,
@@ -417,7 +382,7 @@ const ERC20_APPROVE_ABI = [{
 
 type TxStatus = 'idle' | 'approving' | 'swapping' | 'pending' | 'success' | 'error'
 
-const QUOTE_EXPIRY = 60  // seconds before a quote is considered stale
+const QUOTE_EXPIRY = 60
 
 // ─── CHAIN SELECTOR MODAL ─────────────────────────────────────────────────────
 function ChainModal({ chains, onSelect, onClose }: {
@@ -469,11 +434,13 @@ function TokenModal({ chainName, onSelect, onClose }: {
     loadTokensForChain(chainName).then(t => { setTokens(t); setLoading(false) })
   }, [chainName])
 
+  // PATCH 2: null-safe toLowerCase to prevent crash on tokens with missing fields
+  const ql = q.toLowerCase()
   const filtered = tokens.filter(t =>
-    t.symbol.toLowerCase().includes(q.toLowerCase()) ||
-    t.name.toLowerCase().includes(q.toLowerCase()) ||
-    t.address.toLowerCase() === q.toLowerCase()
-  ).slice(0, 80) // cap for performance
+    (t.symbol  ?? '').toLowerCase().includes(ql) ||
+    (t.name    ?? '').toLowerCase().includes(ql) ||
+    (t.address ?? '').toLowerCase() === ql
+  ).slice(0, 80)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={onClose}>
@@ -519,31 +486,28 @@ function TokenModal({ chainName, onSelect, onClose }: {
 }
 
 // ─── MAIN PAGE ────────────────────────────────────────────────────────────────
-// Public RPC endpoints per Rubic chain name (client-side balance fetching)
-// Gas buffer per chain for MAX button (in native token units)
-// Conservative estimate based on typical gas cost at normal gas prices
 const CHAIN_GAS_BUFFER: Record<string, number> = {
-  ETH:       0.003,   // ~$9 @ $3000 ETH — covers complex DEX swaps
-  ARBITRUM:  0.001,   // ~$3 — L2, cheaper
+  ETH:       0.003,
+  ARBITRUM:  0.001,
   OPTIMISM:  0.001,
   BASE:      0.001,
   ZKSYNC:    0.001,
   LINEA:     0.001,
   SCROLL:    0.001,
   BLAST:     0.001,
-  MANTLE:    0.5,     // MNT is cheap
-  BSC:       0.003,   // BNB ~$0.90
-  POLYGON:   0.5,     // POL/MATIC is cheap
-  AVALANCHE: 0.01,    // AVAX ~$0.40
-  FANTOM:    1.0,     // FTM is cheap
+  MANTLE:    0.5,
+  BSC:       0.003,
+  POLYGON:   0.5,
+  AVALANCHE: 0.01,
+  FANTOM:    1.0,
   CRONOS:    0.5,
   GNOSIS:    0.1,
   CELO:      0.05,
   MOONBEAM:  0.05,
   MOONRIVER: 0.05,
   METIS:     0.005,
-  MONAD:     0.01,    // MON — conservative
-  SOLANA:    0.01,    // SOL — ~$0.002 fees
+  MONAD:     0.01,
+  SOLANA:    0.01,
 }
 
 const CHAIN_RPC: Record<string, string> = {
@@ -572,7 +536,6 @@ const CHAIN_RPC: Record<string, string> = {
   KAVA:      'https://evm.kava.io',
 }
 
-// Block explorer tx URL per chain
 const CHAIN_EXPLORER: Record<string, string> = {
   ETH:       'https://etherscan.io/tx',
   BSC:       'https://bscscan.com/tx',
@@ -599,9 +562,9 @@ const CHAIN_EXPLORER: Record<string, string> = {
   KAVA:      'https://explorer.kava.io/tx',
 }
 
-// Rubic chain name → EVM chain ID (for wagmi chain switching)
 const CHAIN_ID: Record<string, number> = {
-  ETH: 1, BSC: 56, POLYGON: 137, ARBITRUM: 42161, OPTIMISM: 10,
+  ETH: 1, BSC: 56, POLYGON: 137,
+  ARBITRUM: 42161, OPTIMISM: 10,
   BASE: 8453, AVALANCHE: 43114, MONAD: 143, FANTOM: 250,
   GNOSIS: 100, CELO: 42220, LINEA: 59144, SCROLL: 534352,
   MANTLE: 5000, BLAST: 81457, ZKSYNC: 324, CRONOS: 25,
@@ -614,7 +577,6 @@ const USDC_MONAD: Token = {
   logoURI: OVERRIDE_LOGOS.USDC,
 }
 
-const ETH_CHAIN: Chain = { id: 1, name: 'ETH', type: 'EVM' }
 const MONAD_CHAIN: Chain = { id: 143, name: 'MONAD', type: 'EVM' }
 
 export default function SwapPage() {
@@ -629,7 +591,7 @@ export default function SwapPage() {
   const [toToken,   setToToken]   = useState<Token>(USDC_MONAD)
   const [amount,    setAmount]    = useState('')
   const [receiver,  setReceiver]  = useState('')
-  const [slippage,  setSlippage]  = useState(SLIPPAGE_ON_CHAIN) // user-configurable
+  const [slippage,  setSlippage]  = useState(SLIPPAGE_ON_CHAIN)
   const [showSlippage, setShowSlippage] = useState(false)
 
   const [quote,        setQuote]        = useState<Quote | null>(null)
@@ -640,23 +602,22 @@ export default function SwapPage() {
   const [txHash,   setTxHash]   = useState<string | null>(null)
   const [txError,  setTxError]  = useState<string | null>(null)
 
-  const [modal, setModal] = useState<'fromToken' | 'toToken' | 'fromChain' | 'toChain' | null>(null)
-  const [quoteAge,   setQuoteAge]   = useState(0)   // seconds since last quote
+  const [modal,     setModal]     = useState<'fromToken' | 'toToken' | 'fromChain' | 'toChain' | null>(null)
+  const [quoteAge,  setQuoteAge]  = useState(0)
   const [receiverError, setReceiverError] = useState<string | null>(null)
 
   const validateReceiver = useCallback((val: string): boolean => {
-    if (!val.trim()) return true  // empty = use sender wallet, always valid
-    // EVM address: 0x + 40 hex chars. Solana: base58 32-44 chars (handled loosely)
+    if (!val.trim()) return true
     const isEVM = /^0x[0-9a-fA-F]{40}$/.test(val.trim())
     const isSol = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(val.trim())
     const valid = isEVM || (toChain.type === 'SOLANA' ? isSol : false)
     setReceiverError(valid ? null : 'Invalid address format')
     return valid
   }, [toChain.type])
+
   const quoteAgeRef    = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollCleanupRef = useRef<(() => void) | null>(null)
 
-  // ── Token balance via RPC (works for any chain, no wagmi dependency) ────────
   const [fromBalance, setFromBalance] = useState<number | null>(null)
 
   useEffect(() => {
@@ -680,7 +641,6 @@ export default function SwapPage() {
           const d = await res.json()
           raw = BigInt(d.result ?? '0x0')
         } else {
-          // balanceOf(address) — selector 0x70a08231
           const padded = address!.replace('0x', '').padStart(64, '0')
           const res = await fetch(rpc, {
             method: 'POST', signal: controller.signal,
@@ -695,7 +655,7 @@ export default function SwapPage() {
         }
         const decimals = fromToken.decimals ?? 18
         setFromBalance(Number(raw) / Math.pow(10, decimals))
-      } catch { /* aborted or network error — leave null */ }
+      } catch { /* aborted or network error */ }
     }
 
     fetchBal()
@@ -714,23 +674,20 @@ export default function SwapPage() {
     const buffer = isNative ? (CHAIN_GAS_BUFFER[fromChain.name] ?? 0.002) : 0
     const maxAmt = Math.max(0, fromBalance - buffer)
     if (maxAmt <= 0) { setAmount(''); return }
-    // Truncate to token decimals (avoid float precision exceeding real balance)
-    const dec = Math.min(fromToken.decimals ?? 18, 8) // cap display at 8 decimals
+    const dec = Math.min(fromToken.decimals ?? 18, 8)
     const truncated = Math.floor(maxAmt * Math.pow(10, dec)) / Math.pow(10, dec)
     setAmount(truncated > 0 ? truncated.toString() : '')
   }
+
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { sendTransactionAsync } = useSendTransaction()
 
-  // Load chain list on mount
   useEffect(() => { loadChains().then(setChains) }, [])
 
-  // Cancel any in-flight status poll when component unmounts
   useEffect(() => {
     return () => { pollCleanupRef.current?.() }
   }, [])
 
-  // Quote age ticker — runs while a quote is active
   useEffect(() => {
     if (quote) {
       setQuoteAge(0)
@@ -744,7 +701,6 @@ export default function SwapPage() {
 
   const quoteExpired = quoteAge >= QUOTE_EXPIRY
 
-  // Quote with debounce
   const getQuote = useCallback(async (amt: string) => {
     if (!amt || isNaN(Number(amt)) || Number(amt) <= 0) { setQuote(null); return }
     setQuoteLoading(true); setQuoteError(null)
@@ -768,20 +724,15 @@ export default function SwapPage() {
     setAmount(''); setQuote(null)
   }
 
-  // Fix #6: Parse swap amount into raw bigint for exact ERC-20 approval
   function parseSwapAmount(amt: string, decimals: number): bigint {
     try {
       const parsed = parseFloat(amt)
       if (isNaN(parsed) || parsed <= 0) return 0n
-      // Add 0.5% buffer to handle minor rounding between quote and execution
       const withBuffer = parsed * 1.005
       return BigInt(Math.floor(withBuffer * Math.pow(10, decimals)))
     } catch { return 0n }
   }
 
-  // Fix #7: Validate the transaction object returned by Rubic before signing.
-  // Checks: (1) `to` is a valid EVM address, (2) `data` starts with 0x,
-  // (3) `value` is not astronomically larger than the expected swap value.
   function validateRubicTransaction(
     tx: { to: string; data: string; value?: string; approvalAddress?: string },
     swapAmount: string,
@@ -789,15 +740,9 @@ export default function SwapPage() {
   ): boolean {
     const EVM_ADDR = /^0x[0-9a-fA-F]{40}$/
     const HEX_DATA = /^0x[0-9a-fA-F]*$/
-
     if (!EVM_ADDR.test(tx.to))   return false
     if (!HEX_DATA.test(tx.data)) return false
-
-    // approvalAddress, if present, must also be a valid address
     if (tx.approvalAddress && !EVM_ADDR.test(tx.approvalAddress)) return false
-
-    // The native value sent must not exceed the swap amount by more than 5x
-    // (accounts for bridge fees, gas topups, etc.)
     if (tx.value && tx.value !== '0') {
       try {
         const valueBig   = BigInt(tx.value)
@@ -806,7 +751,6 @@ export default function SwapPage() {
         if (amountBig > 0n && valueBig > maxAllowed) return false
       } catch { return false }
     }
-
     return true
   }
 
@@ -817,11 +761,8 @@ export default function SwapPage() {
     try {
       const recv = receiver.trim() || address
 
-      // Step 1: For ERC-20 tokens, check and approve allowance BEFORE calling Rubic swap
-      // Rubic validates allowance server-side — if insufficient it returns 400 (code 3001)
       if (fromToken.address !== NATIVE) {
         setTxStatus('approving')
-        // Read on-chain allowance for the Rubic router
         const RUBIC_ROUTER = '0x3335733c454805df6a77f825f266e136FB4a3333'
         const allowanceData = encodeFunctionData({
           abi: [{
@@ -834,7 +775,6 @@ export default function SwapPage() {
         })
         const requiredAmount = parseSwapAmount(amount, fromToken.decimals)
 
-        // Fetch allowance via RPC
         let currentAllowance = 0n
         try {
           const rpcUrl = CHAIN_RPC[fromChain.name] ?? 'https://rpc.monad.xyz'
@@ -860,19 +800,16 @@ export default function SwapPage() {
               args: [RUBIC_ROUTER as `0x${string}`, requiredAmount],
             }),
           })
-          // Wait a moment for the approval to propagate
           await new Promise(r => setTimeout(r, 2000))
         }
       }
 
-      // Step 2: Now fetch swap tx (Rubic will see the allowance)
       setTxStatus('swapping')
       const { transaction } = await fetchSwapTx(
         fromChain.name, fromToken, amount,
         toChain.name, toToken,
         address, quote.id, recv, slippage,
       )
-      // Approval already handled above — validate and execute swap tx
       if (!validateRubicTransaction(transaction, amount, fromToken.decimals)) {
         throw new Error('Suspicious transaction — rejected for your safety')
       }
@@ -901,8 +838,7 @@ export default function SwapPage() {
           })
           const json = await r.json()
           const receipt = json?.result
-          if (!receipt) return null // not mined yet
-          // status "0x1" = success, "0x0" = reverted
+          if (!receipt) return null
           return receipt.status === '0x1' ? 'success' : 'reverted'
         } catch { return null }
       }
@@ -910,14 +846,11 @@ export default function SwapPage() {
       const poll = async () => {
         if (cancelled) return
         try {
-          // For same-chain swaps, check receipt directly (Rubic status API doesn't track these reliably)
           const receiptStatus = await checkReceipt()
           if (receiptStatus === 'success') { setTxStatus('success'); return }
           if (receiptStatus === 'reverted') {
             setTxStatus('error'); setTxError('Transaction reverted on-chain'); return
           }
-
-          // Also check Rubic status (mainly useful for cross-chain)
           const isCross = fromChain.name !== toChain.name
           if (isCross) {
             const r = await fetch(`https://api-v2.rubic.exchange/api/info/status?srcTxHash=${hash}`)
@@ -930,7 +863,6 @@ export default function SwapPage() {
         } catch {}
         if (!cancelled && attempts++ < 60) pollTimer = setTimeout(poll, 3000)
         else if (!cancelled) {
-          // After max attempts, check receipt one last time
           const finalStatus = await checkReceipt()
           if (finalStatus === 'success') setTxStatus('success')
           else setTxStatus('error')
@@ -948,13 +880,10 @@ export default function SwapPage() {
     const raw = Number(quote.estimate.destinationTokenAmount)
     if (isNaN(raw) || raw === 0) return '0'
     const decimals = toToken.decimals ?? 18
-    // Use BigInt for wei values to avoid JS Number precision loss (> 2^53)
-    // Detect wei: if string has no decimal point AND integer value > 10^(dec-8)
     const rawStr = String(quote.estimate.destinationTokenAmount).trim()
     const isWei = !rawStr.includes('.') && raw > Math.pow(10, Math.max(0, decimals - 8))
     let human: number
     if (isWei) {
-      // Safe BigInt division preserving up to 8 significant decimal places
       const bigRaw  = BigInt(rawStr)
       const bigDiv  = BigInt(10 ** Math.max(0, decimals - 8))
       const shifted = Number(bigRaw / bigDiv)
@@ -962,13 +891,13 @@ export default function SwapPage() {
     } else {
       human = raw
     }
-    // Format nicely: fewer decimals for large values, more for small
     if (human >= 1000)  return human.toLocaleString('en-US', { maximumFractionDigits: 2 })
     if (human >= 1)     return human.toFixed(4)
     if (human >= 0.001) return human.toFixed(6)
     return human.toExponential(4)
   }, [quote, toToken.decimals])
-  const isCrossChain   = fromChain.name !== toChain.name
+
+  const isCrossChain    = fromChain.name !== toChain.name
   const expectedChainId = CHAIN_ID[fromChain.name]
   const wrongChain = isConnected && !!expectedChainId && connectedChainId !== expectedChainId
   const canSwap = isConnected && !!quote && !quoteExpired && !!amount && txStatus === 'idle' && !wrongChain
@@ -1153,11 +1082,7 @@ export default function SwapPage() {
                   </div>
                   <div className="flex items-center gap-2 mt-1">
                     <input
-                      type="number"
-                      min={0.1}
-                      max={50}
-                      step={0.1}
-                      value={slippage}
+                      type="number" min={0.1} max={50} step={0.1} value={slippage}
                       onChange={e => {
                         const v = parseFloat(e.target.value)
                         if (!isNaN(v) && v > 0 && v <= 50) setSlippage(v)
@@ -1165,12 +1090,7 @@ export default function SwapPage() {
                       className="flex-1 text-xs px-2 py-1.5 border border-gray-200 rounded-lg text-center focus:outline-none focus:border-violet-300"
                     />
                     <span className="text-xs text-gray-400">%</span>
-                    <button
-                      onClick={() => setShowSlippage(false)}
-                      className="text-xs font-semibold text-violet-600 hover:text-violet-800"
-                    >
-                      Done
-                    </button>
+                    <button onClick={() => setShowSlippage(false)} className="text-xs font-semibold text-violet-600 hover:text-violet-800">Done</button>
                   </div>
                   {slippage > 5 && (
                     <p className="text-xs text-amber-500 mt-0.5">High slippage may result in unfavorable rates</p>
