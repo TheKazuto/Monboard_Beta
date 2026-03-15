@@ -1,28 +1,14 @@
 /**
  * priceCache.ts — cache unificado de preços CoinGecko.
  *
- * Estratégia de cache em duas camadas (L1 + L2):
+ * Cache em duas camadas:
+ *   L1 — In-memory por isolate (0ms, reseta em cold starts)
+ *   L2 — Cloudflare Workers KV (global, sobrevive a cold starts)
  *
- *   L1 — In-memory (módulo-level, ~0ms)
- *       Serve requests dentro do mesmo isolate sem latência.
- *       Reseta em cold starts e é isolado por instância do Worker.
- *
- *   L2 — Cloudflare Workers KV (~5–50ms)
- *       Compartilhado entre todos os isolates e regiões.
- *       Sobrevive a cold starts. Garante que uma nova instância não
- *       precise chamar a CoinGecko se outra já populou o KV recentemente.
- *
- * Fluxo de leitura:
- *   1. In-memory fresco? → retorna imediatamente (L1 hit)
- *   2. KV disponível e com dado fresco? → popula L1 e retorna (L2 hit)
- *   3. Busca na CoinGecko → grava em KV e L1 (miss total)
- *
- * Resultado: com múltiplos isolates rodando, cada isolate faz no máximo
- * 1 chamada à CoinGecko por cold start. O KV garante que isolates novos
- * não precisem buscar na CoinGecko se o dado já está lá.
+ * Fluxo: L1 fresco → KV fresco → CoinGecko → grava KV + L1
  */
 
-import { getOptionalRequestContext } from '@opennextjs/cloudflare'
+import { getCloudflareContext } from '@opennextjs/cloudflare'
 
 // ─── Master coin list ─────────────────────────────────────────────────────────
 export const ALL_COIN_IDS = [
@@ -44,7 +30,7 @@ export interface PriceData {
   fetchedAt: number
 }
 
-// ─── Fallback hardcoded ───────────────────────────────────────────────────────
+// ─── Fallback hardcoded (CoinGecko indisponível) ──────────────────────────────
 const FALLBACK: PriceData = {
   prices: {
     'monad':           0.02,
@@ -60,22 +46,26 @@ const FALLBACK: PriceData = {
 }
 
 // ─── TTLs ─────────────────────────────────────────────────────────────────────
-const TTL_MS  = 5 * 60 * 1000   // 5 minutos em ms  (comparação com Date.now())
-const TTL_SEC = 5 * 60          // 5 minutos em seg  (KV usa segundos)
+const TTL_MS  = 5 * 60 * 1000  // 5 min em ms  (comparação com Date.now())
+const TTL_SEC = 5 * 60         // 5 min em seg  (KV expirationTtl usa segundos)
 
-// ─── L1 — In-memory (por isolate) ────────────────────────────────────────────
+// ─── L1 — In-memory ───────────────────────────────────────────────────────────
 let memCache:     PriceData | null = null
 let fetchPromise: Promise<PriceData> | null = null
 
-// ─── L2 — Cloudflare Workers KV (global, entre isolates) ─────────────────────
+// ─── L2 — Cloudflare Workers KV ──────────────────────────────────────────────
 const KV_KEY = 'prices:all'
 
+/**
+ * Retorna o KV binding ou null se não estiver disponível
+ * (build time, desenvolvimento local sem wrangler, etc.)
+ */
 function getKV(): KVNamespace | null {
   try {
-    const ctx = getOptionalRequestContext()
+    const ctx = getCloudflareContext()
     return (ctx?.env as CloudflareEnv | undefined)?.PRICE_KV ?? null
   } catch {
-    // Fora do contexto de request (ex: build time) — retorna null silenciosamente
+    // getCloudflareContext lança fora de um request ativo (ex: build time)
     return null
   }
 }
@@ -85,7 +75,6 @@ async function readFromKV(kv: KVNamespace): Promise<PriceData | null> {
     const raw = await kv.get(KV_KEY)
     if (!raw) return null
     const data = JSON.parse(raw) as PriceData
-    // Valida estrutura mínima para evitar dado corrompido
     if (!data.prices || typeof data.fetchedAt !== 'number') return null
     return data
   } catch {
@@ -134,8 +123,7 @@ async function fetchFromCoinGecko(): Promise<PriceData> {
 
 /**
  * Retorna preços, imagens e variação 24h de todos os tokens do projeto.
- *
- * Hierarquia de cache: L1 in-memory (0ms) → L2 KV (~10ms) → CoinGecko (~300ms)
+ * Hierarquia: L1 in-memory (0ms) → L2 KV (~10ms) → CoinGecko (~300ms)
  */
 export async function getAllPrices(): Promise<PriceData> {
   const now = Date.now()
@@ -143,7 +131,7 @@ export async function getAllPrices(): Promise<PriceData> {
   // ── L1: in-memory fresco ──────────────────────────────────────────────────
   if (memCache && now - memCache.fetchedAt < TTL_MS) return memCache
 
-  // ── Deduplicação: evita múltiplos fetches simultâneos no mesmo isolate ────
+  // ── Deduplicação: apenas um fetch simultâneo por isolate ──────────────────
   if (fetchPromise) {
     try { return await fetchPromise } catch { /* segue para fallback */ }
   }
@@ -151,16 +139,16 @@ export async function getAllPrices(): Promise<PriceData> {
   fetchPromise = (async (): Promise<PriceData> => {
     const kv = getKV()
 
-    // ── L2: KV (compartilhado globalmente) ───────────────────────────────────
+    // ── L2: KV (compartilhado entre isolates/regiões) ─────────────────────
     if (kv) {
       const kvData = await readFromKV(kv)
       if (kvData && now - kvData.fetchedAt < TTL_MS) {
-        memCache = kvData  // aquece L1 com o dado do KV
+        memCache = kvData  // aquece L1 com dado do KV
         return kvData
       }
     }
 
-    // ── Miss total: busca na CoinGecko ───────────────────────────────────────
+    // ── Miss total: busca na CoinGecko ────────────────────────────────────
     const fresh = await fetchFromCoinGecko()
     memCache = fresh
     if (kv) await writeToKV(kv, fresh)

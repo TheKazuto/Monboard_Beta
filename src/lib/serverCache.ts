@@ -1,14 +1,14 @@
 /**
  * serverCache.ts — cache genérico para respostas de API routes.
  *
- * Mesma estratégia de 2 camadas do priceCache:
+ * Cache em duas camadas:
  *   L1 — In-memory por isolate (0ms, reseta em cold starts)
  *   L2 — Cloudflare Workers KV (global, sobrevive a cold starts)
  *
  * Usado por: /api/top-tokens, /api/exchange-rates, /api/portfolio-history
  */
 
-import { getOptionalRequestContext } from '@opennextjs/cloudflare'
+import { getCloudflareContext } from '@opennextjs/cloudflare'
 
 interface CacheEntry<T> {
   data:      T
@@ -19,36 +19,38 @@ interface CacheEntry<T> {
 // ─── L1 — In-memory ───────────────────────────────────────────────────────────
 const store = new Map<string, CacheEntry<any>>()
 
-// ─── L2 — KV ─────────────────────────────────────────────────────────────────
+// ─── L2 — Cloudflare Workers KV ──────────────────────────────────────────────
+
 function getKV(): KVNamespace | null {
   try {
-    const ctx = getOptionalRequestContext()
+    const ctx = getCloudflareContext()
     return (ctx?.env as CloudflareEnv | undefined)?.PRICE_KV ?? null
   } catch {
+    // Fora do contexto de request (ex: build time) — silencioso
     return null
   }
 }
 
-async function kvGet<T>(key: string): Promise<T | null> {
+async function kvGet<T>(key: string): Promise<{ data: T; fetchedAt: number } | null> {
   const kv = getKV()
   if (!kv) return null
   try {
     const raw = await kv.get(`cache:${key}`)
     if (!raw) return null
-    return JSON.parse(raw) as T
+    return JSON.parse(raw)
   } catch {
     return null
   }
 }
 
-async function kvSet<T>(key: string, value: T, ttlMs: number): Promise<void> {
+async function kvSet<T>(key: string, value: T, fetchedAt: number, ttlMs: number): Promise<void> {
   const kv = getKV()
   if (!kv) return
   try {
     const ttlSec = Math.max(60, Math.floor(ttlMs / 1000))
-    await kv.put(`cache:${key}`, JSON.stringify(value), { expirationTtl: ttlSec })
+    await kv.put(`cache:${key}`, JSON.stringify({ data: value, fetchedAt }), { expirationTtl: ttlSec })
   } catch (err) {
-    console.error(`[serverCache] KV write failed for key "${key}":`, err)
+    console.error(`[serverCache] KV write failed for "${key}":`, err)
   }
 }
 
@@ -69,36 +71,32 @@ export async function cached<T>(
   const entry = store.get(key) as CacheEntry<T> | undefined
   const now   = Date.now()
 
-  // ── L1: in-memory fresco ────────────────────────────────────────────────
+  // ── L1: in-memory fresco ──────────────────────────────────────────────────
   if (entry && !entry.promise && now - entry.fetchedAt < ttlMs) {
     return entry.data
   }
 
-  // ── Deduplicação de requests em voo ────────────────────────────────────
+  // ── Deduplicação de requests em voo ──────────────────────────────────────
   if (entry?.promise) {
     return entry.promise
   }
 
-  // ── Inicia fetch ────────────────────────────────────────────────────────
   const promise: Promise<T> = (async () => {
-    // ── L2: KV ──────────────────────────────────────────────────────────
-    const kvData = await kvGet<{ data: T; fetchedAt: number }>(key)
-    if (kvData && now - kvData.fetchedAt < ttlMs) {
-      // Aquece L1 com dado do KV
-      store.set(key, { data: kvData.data, fetchedAt: kvData.fetchedAt, promise: null })
-      return kvData.data
+    // ── L2: KV ───────────────────────────────────────────────────────────
+    const kvEntry = await kvGet<T>(key)
+    if (kvEntry && now - kvEntry.fetchedAt < ttlMs) {
+      store.set(key, { data: kvEntry.data, fetchedAt: kvEntry.fetchedAt, promise: null })
+      return kvEntry.data
     }
 
-    // ── Miss total: executa fetcher ──────────────────────────────────────
-    const data = await fetcher()
+    // ── Miss total: executa fetcher ───────────────────────────────────────
+    const data      = await fetcher()
     const fetchedAt = Date.now()
     store.set(key, { data, fetchedAt, promise: null })
-    // Grava no KV com o timestamp incluído para verificação de freshness
-    await kvSet(key, { data, fetchedAt }, ttlMs)
+    await kvSet(key, data, fetchedAt, ttlMs)
     return data
   })()
 
-  // Regista promise para deduplicação
   store.set(key, {
     data:      entry?.data ?? (null as any),
     fetchedAt: entry?.fetchedAt ?? 0,
@@ -108,7 +106,6 @@ export async function cached<T>(
   try {
     return await promise
   } catch (err) {
-    // Limpa promise e tenta retornar dado stale
     const current = store.get(key)
     if (current) store.set(key, { ...current, promise: null })
     if (entry?.data != null) return entry.data
