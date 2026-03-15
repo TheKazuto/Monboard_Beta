@@ -98,11 +98,11 @@ async function testNeverland(user: string) {
   try {
     const paddedUser = user.slice(2).toLowerCase().padStart(64, '0')
     const results = await rpcBatch([
-      ethCall(POOL, '0xbf92857c' + paddedUser, 'acct'),
-      ethCall(POOL, '0x35ea6a75' + WMON.slice(2).padStart(64, '0'), 'reserve'),
+      ethCall(POOL, '0xbf92857c' + paddedUser, 998),
+      ethCall(POOL, '0x35ea6a75' + WMON.slice(2).padStart(64, '0'), 999),
     ])
-    const acctRaw    = results.find((r: any) => r.id === 'acct')?.result  ?? null
-    const reserveRaw = results.find((r: any) => r.id === 'reserve')?.result ?? null
+    const acctRaw    = results.find((r: any) => r.id === 998)?.result  ?? null
+    const reserveRaw = results.find((r: any) => r.id === 999)?.result ?? null
 
     let totalCollateralUSD = 0
     if (acctRaw && acctRaw !== '0x') {
@@ -119,8 +119,8 @@ async function testNeverland(user: string) {
       acctRaw_first64: acctRaw?.slice(0, 66) ?? null,
       totalCollateralUSD,
       aTokenFromReserve,
-      acctError: results.find((r: any) => r.id === 'acct')?.error ?? null,
-      reserveError: results.find((r: any) => r.id === 'reserve')?.error ?? null,
+      acctError: results.find((r: any) => r.id === 998)?.error ?? null,
+      reserveError: results.find((r: any) => r.id === 999)?.error ?? null,
     }
   } catch (e: any) {
     return { error: e?.message ?? String(e), stack: e?.stack?.slice(0, 300) }
