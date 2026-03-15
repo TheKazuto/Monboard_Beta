@@ -1,17 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { cached } from '@/lib/serverCache'
 
-// In-memory cache — 1h TTL
-const cache = new Map<string, { data: unknown; ts: number }>()
-const TTL = 60 * 60 * 1000
-
-// Fix #3 (ALTO): Strict allowlist of valid platform values.
-// Previously, the `platform` param was interpolated directly into the CoinGecko URL
-// without any validation, enabling path traversal and cache-key poisoning.
-// Now only known-good values are accepted — anything else gets a 400.
+// Migrated from local Map cache to serverCache (L1 in-memory + L2 KV).
+// TTL 24h — token lists change rarely. Both GeckoTerminal and CoinGecko
+// token-list endpoints are free, but the payloads are large (ethereum has
+// thousands of tokens), so persisting them in KV avoids repeated heavy fetches
+// across cold starts and multiple isolates.
+const TTL = 24 * 60 * 60 * 1000 // 24 hours
 
 /** Platforms served via GeckoTerminal (Monad not yet on CoinGecko token list) */
 const GECKO_TERMINAL_NETWORKS: Record<string, string> = {
-  monad:          'monad',
+  monad:           'monad',
   'monad-mainnet': 'monad',
 }
 
@@ -75,11 +74,13 @@ async function fetchFromGeckoTerminal(network: string) {
         if (!addr || tokenMap.has(addr)) continue
 
         tokenMap.set(addr, {
-          symbol:   (a.symbol as string) ?? '',
-          name:     (a.name as string) ?? (a.symbol as string) ?? '',
-          address:  a.address as string,
+          symbol:   (a.symbol   as string) ?? '',
+          name:     (a.name     as string) ?? (a.symbol as string) ?? '',
+          address:  a.address   as string,
           decimals: (a.decimals as number) ?? 18,
-          logoURI:  a.image_url && a.image_url !== 'missing.png' ? (a.image_url as string) : '',
+          logoURI:  a.image_url && a.image_url !== 'missing.png'
+            ? (a.image_url as string)
+            : '',
         })
       }
     } catch { break }
@@ -94,38 +95,28 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Missing platform', tokens: [] }, { status: 400 })
   }
 
-  // Fix #3: Reject any platform not in our allowlists
-  const gtNetwork = GECKO_TERMINAL_NETWORKS[platform]
+  const gtNetwork   = GECKO_TERMINAL_NETWORKS[platform]
   const isCoinGecko = COINGECKO_PLATFORMS.has(platform)
   if (!gtNetwork && !isCoinGecko) {
     return NextResponse.json({ error: 'Unsupported platform', tokens: [] }, { status: 400 })
   }
 
-  // Check cache (key is now guaranteed to be a known-safe value)
-  const cached = cache.get(platform)
-  if (cached && Date.now() - cached.ts < TTL) {
-    return NextResponse.json(cached.data)
-  }
-
   try {
-    let data: unknown
-
-    if (gtNetwork) {
-      data = await fetchFromGeckoTerminal(gtNetwork)
-    } else {
-      // Safe: platform is a member of the COINGECKO_PLATFORMS allowlist
+    const data = await cached(`token-list:${platform}`, async () => {
+      if (gtNetwork) {
+        return fetchFromGeckoTerminal(gtNetwork)
+      }
+      // CoinGecko static token list — free endpoint, no API key required
       const res = await fetch(`https://tokens.coingecko.com/${platform}/all.json`, {
         headers: { 'Accept': 'application/json' },
         cache: 'no-store',
       })
       if (!res.ok) throw new Error(`CoinGecko ${res.status}`)
-      data = await res.json()
-    }
+      return res.json()
+    }, TTL)
 
-    cache.set(platform, { data, ts: Date.now() })
     return NextResponse.json(data)
   } catch (e: unknown) {
-    // Fix #9: Generic error — no internal details exposed
     console.error('[token-list] platform:', platform, 'error:', e instanceof Error ? e.message : e)
     return NextResponse.json({ error: 'Failed to fetch token list', tokens: [] }, { status: 502 })
   }
