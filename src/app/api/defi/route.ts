@@ -205,7 +205,10 @@ async function fetchNeverland(user: string): Promise<any[]> {
       totalCollateralUSD, totalDebtUSD,
       netValueUSD: totalCollateralUSD - totalDebtUSD, healthFactor,
     }]
-  } catch { return [] }
+  } catch (e: any) {
+    console.error('[defi][Neverland]', e?.message ?? e, e?.stack?.slice(0, 300))
+    return []
+  }
 }
 
 // ─── MORPHO ───────────────────────────────────────────────────────────────────
@@ -274,7 +277,10 @@ async function fetchMorpho(user: string): Promise<any[]> {
       })
     }
     return out
-  } catch { return [] }
+  } catch (e: any) {
+    console.error('[defi][Morpho]', e?.message ?? e)
+    return []
+  }
 }
 
 // ─── UNISWAP V3 / PANCAKESWAP V3 ─────────────────────────────────────────────
@@ -428,7 +434,10 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
       })
     }
     return positions
-  } catch { return [] }
+  } catch (e: any) {
+    console.error('[defi][UniswapV3]', e?.message ?? e, e?.stack?.slice(0, 300))
+    return []
+  }
 }
 
 // ─── CURVE ────────────────────────────────────────────────────────────────────
@@ -587,7 +596,7 @@ async function fetchGearbox(user: string): Promise<any[]> {
       })
     }
     return positions
-  } catch { return [] }
+  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── UPSHIFT ──────────────────────────────────────────────────────────────────
@@ -636,7 +645,7 @@ async function fetchUpshift(user: string): Promise<any[]> {
       })
     }
     return positions
-  } catch { return [] }
+  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── KINTSU (sMON LST) ────────────────────────────────────────────────────────
@@ -653,7 +662,7 @@ async function fetchKintsu(user: string, monPrice: number): Promise<any[]> {
     const usd         = monAmt * monPrice
     if (sharesFloat < 0.001) return []
     return [{ protocol: 'Kintsu', type: 'vault', logo: '🔵', url: 'https://kintsu.xyz', chain: 'Monad', label: 'Staked MON', asset: 'sMON', amount: sharesFloat, amountUSD: usd, apy: 0, netValueUSD: usd }]
-  } catch { return [] }
+  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── MAGMA (gMON LST) ─────────────────────────────────────────────────────────
@@ -670,7 +679,7 @@ async function fetchMagma(user: string, monPrice: number): Promise<any[]> {
     const usd         = monAmt * monPrice
     if (sharesFloat < 0.001) return []
     return [{ protocol: 'Magma', type: 'vault', logo: '🐲', url: 'https://magmastaking.xyz', chain: 'Monad', label: 'MEV-Optimized Staked MON', asset: 'gMON', amount: sharesFloat, amountUSD: usd, apy: 0, netValueUSD: usd }]
-  } catch { return [] }
+  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── shMONAD ──────────────────────────────────────────────────────────────────
@@ -687,7 +696,7 @@ async function fetchShMonad(user: string, monPrice: number): Promise<any[]> {
     const usd         = monAmt * monPrice
     if (sharesFloat < 0.001) return []
     return [{ protocol: 'shMonad', type: 'vault', logo: '⚡', url: 'https://shmonad.xyz', chain: 'Monad', label: 'Holistic Staked MON', asset: 'shMON', amount: sharesFloat, amountUSD: usd, apy: 0, netValueUSD: usd }]
-  } catch { return [] }
+  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── LAGOON FINANCE ───────────────────────────────────────────────────────────
@@ -730,7 +739,7 @@ async function fetchLagoon(user: string): Promise<any[]> {
       })
     }
     return positions
-  } catch { return [] }
+  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── KURU ─────────────────────────────────────────────────────────────────────
@@ -765,7 +774,7 @@ async function fetchKuru(user: string): Promise<any[]> {
       })
     })
     return items
-  } catch { return [] }
+  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── CURVANCE ─────────────────────────────────────────────────────────────────
@@ -832,7 +841,7 @@ async function fetchCurvance(user: string): Promise<any[]> {
         netValueUSD: totalCollateralUSD - totalDebtUSD, healthFactor,
       }
     })
-  } catch { return [] }
+  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── EULER V2 ─────────────────────────────────────────────────────────────────
@@ -871,7 +880,7 @@ async function fetchEulerV2(user: string): Promise<any[]> {
           healthFactor: p.healthScore ? Number(p.healthScore) : null,
         }
       })
-  } catch { return [] }
+  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
