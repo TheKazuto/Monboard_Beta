@@ -1,26 +1,32 @@
 /**
- * priceCache.ts — single source of truth for CoinGecko price data.
+ * priceCache.ts — cache unificado de preços CoinGecko.
  *
- * Problem solved:
- *   Previously every API route (token-exposure, defi, mon-price, nfts) made
- *   its own independent CoinGecko call with short TTLs (30–60s). With multiple
- *   concurrent users this multiplied into dozens of calls per minute for the
- *   exact same data.
+ * Estratégia de cache em duas camadas (L1 + L2):
  *
- * Solution:
- *   One shared cache for ALL price/image/change24h data needed by the project.
- *   A single /coins/markets call fetches every required coin at once.
- *   TTL = 5 minutes — shared across all users and all routes.
- *   In-flight deduplication prevents thundering herd on cache expiry.
+ *   L1 — In-memory (módulo-level, ~0ms)
+ *       Serve requests dentro do mesmo isolate sem latência.
+ *       Reseta em cold starts e é isolado por instância do Worker.
  *
- * CoinGecko calls reduced: from ~1/30s per route to ~1/5min total.
+ *   L2 — Cloudflare Workers KV (~5–50ms)
+ *       Compartilhado entre todos os isolates e regiões.
+ *       Sobrevive a cold starts. Garante que uma nova instância não
+ *       precise chamar a CoinGecko se outra já populou o KV recentemente.
+ *
+ * Fluxo de leitura:
+ *   1. In-memory fresco? → retorna imediatamente (L1 hit)
+ *   2. KV disponível e com dado fresco? → popula L1 e retorna (L2 hit)
+ *   3. Busca na CoinGecko → grava em KV e L1 (miss total)
+ *
+ * Resultado: com múltiplos isolates rodando, cada isolate faz no máximo
+ * 1 chamada à CoinGecko por cold start. O KV garante que isolates novos
+ * não precisem buscar na CoinGecko se o dado já está lá.
  */
 
+import { getOptionalRequestContext } from '@opennextjs/cloudflare'
+
 // ─── Master coin list ─────────────────────────────────────────────────────────
-// All CoinGecko IDs used anywhere in the project.
-// Adding a new token here is the only change needed to include it everywhere.
 export const ALL_COIN_IDS = [
-  'monad',           // MON / WMON / sMON / gMON / shMON / aprMON (all MON-pegged)
+  'monad',           // MON / WMON / sMON / gMON / shMON / aprMON
   'usd-coin',        // USDC
   'ethereum',        // ETH / WETH
   'tether',          // USDT / USDT0
@@ -30,15 +36,15 @@ export const ALL_COIN_IDS = [
 
 export type CoinId = typeof ALL_COIN_IDS[number]
 
-// ─── Cache types ──────────────────────────────────────────────────────────────
+// ─── Tipos ────────────────────────────────────────────────────────────────────
 export interface PriceData {
-  prices:    Record<string, number>  // coinId → USD price
-  images:    Record<string, string>  // coinId → image URL
-  change24h: Record<string, number>  // coinId → 24h % change
+  prices:    Record<string, number>
+  images:    Record<string, string>
+  change24h: Record<string, number>
   fetchedAt: number
 }
 
-// Fallback prices used when CoinGecko is unreachable
+// ─── Fallback hardcoded ───────────────────────────────────────────────────────
 const FALLBACK: PriceData = {
   prices: {
     'monad':           0.02,
@@ -53,13 +59,50 @@ const FALLBACK: PriceData = {
   fetchedAt: 0,
 }
 
-// ─── In-memory cache ──────────────────────────────────────────────────────────
-const PRICE_TTL = 5 * 60 * 1000 // 5 minutes
+// ─── TTLs ─────────────────────────────────────────────────────────────────────
+const TTL_MS  = 5 * 60 * 1000   // 5 minutos em ms  (comparação com Date.now())
+const TTL_SEC = 5 * 60          // 5 minutos em seg  (KV usa segundos)
 
-let cache:   PriceData | null = null
-let promise: Promise<PriceData> | null = null
+// ─── L1 — In-memory (por isolate) ────────────────────────────────────────────
+let memCache:     PriceData | null = null
+let fetchPromise: Promise<PriceData> | null = null
 
-// ─── Fetch ────────────────────────────────────────────────────────────────────
+// ─── L2 — Cloudflare Workers KV (global, entre isolates) ─────────────────────
+const KV_KEY = 'prices:all'
+
+function getKV(): KVNamespace | null {
+  try {
+    const ctx = getOptionalRequestContext()
+    return (ctx?.env as CloudflareEnv | undefined)?.PRICE_KV ?? null
+  } catch {
+    // Fora do contexto de request (ex: build time) — retorna null silenciosamente
+    return null
+  }
+}
+
+async function readFromKV(kv: KVNamespace): Promise<PriceData | null> {
+  try {
+    const raw = await kv.get(KV_KEY)
+    if (!raw) return null
+    const data = JSON.parse(raw) as PriceData
+    // Valida estrutura mínima para evitar dado corrompido
+    if (!data.prices || typeof data.fetchedAt !== 'number') return null
+    return data
+  } catch {
+    return null
+  }
+}
+
+async function writeToKV(kv: KVNamespace, data: PriceData): Promise<void> {
+  try {
+    await kv.put(KV_KEY, JSON.stringify(data), { expirationTtl: TTL_SEC })
+  } catch (err) {
+    // Falha de escrita não deve quebrar a resposta ao usuário
+    console.error('[priceCache] KV write failed:', err)
+  }
+}
+
+// ─── Fetch CoinGecko ──────────────────────────────────────────────────────────
 async function fetchFromCoinGecko(): Promise<PriceData> {
   const apiKey  = process.env.COINGECKO_API_KEY
   const headers: Record<string, string> = { Accept: 'application/json' }
@@ -70,63 +113,80 @@ async function fetchFromCoinGecko(): Promise<PriceData> {
     `https://api.coingecko.com/api/v3/coins/markets?ids=${ids}&vs_currency=usd&per_page=20&price_change_percentage=24h`,
     { headers, cache: 'no-store', signal: AbortSignal.timeout(8_000) }
   )
-
   if (!res.ok) throw new Error(`CoinGecko ${res.status}`)
 
-  const data: any[] = await res.json()
+  const coins: any[] = await res.json()
   const prices:    Record<string, number> = {}
   const images:    Record<string, string> = {}
   const change24h: Record<string, number> = {}
 
-  for (const coin of data) {
+  for (const coin of coins) {
     if (!coin.id) continue
-    prices[coin.id]    = coin.current_price                  ?? 0
-    change24h[coin.id] = coin.price_change_percentage_24h   ?? 0
+    prices[coin.id]    = coin.current_price                ?? 0
+    change24h[coin.id] = coin.price_change_percentage_24h  ?? 0
     if (coin.image) images[coin.id] = coin.image
   }
 
   return { prices, images, change24h, fetchedAt: Date.now() }
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// ─── API pública ──────────────────────────────────────────────────────────────
 
 /**
- * Get all prices, images and 24h changes for every token used in the project.
- * Results are cached for 5 minutes and shared across all concurrent requests.
- * Falls back to stale data (or hardcoded fallback) if CoinGecko is unreachable.
+ * Retorna preços, imagens e variação 24h de todos os tokens do projeto.
+ *
+ * Hierarquia de cache: L1 in-memory (0ms) → L2 KV (~10ms) → CoinGecko (~300ms)
  */
 export async function getAllPrices(): Promise<PriceData> {
   const now = Date.now()
 
-  // Return fresh cache immediately (no await)
-  if (cache && now - cache.fetchedAt < PRICE_TTL) return cache
+  // ── L1: in-memory fresco ──────────────────────────────────────────────────
+  if (memCache && now - memCache.fetchedAt < TTL_MS) return memCache
 
-  // Deduplicate concurrent requests — share one in-flight fetch
-  if (promise) {
-    try { return await promise } catch { /* fall through to stale/fallback */ }
+  // ── Deduplicação: evita múltiplos fetches simultâneos no mesmo isolate ────
+  if (fetchPromise) {
+    try { return await fetchPromise } catch { /* segue para fallback */ }
   }
 
-  promise = fetchFromCoinGecko()
+  fetchPromise = (async (): Promise<PriceData> => {
+    const kv = getKV()
+
+    // ── L2: KV (compartilhado globalmente) ───────────────────────────────────
+    if (kv) {
+      const kvData = await readFromKV(kv)
+      if (kvData && now - kvData.fetchedAt < TTL_MS) {
+        memCache = kvData  // aquece L1 com o dado do KV
+        return kvData
+      }
+    }
+
+    // ── Miss total: busca na CoinGecko ───────────────────────────────────────
+    const fresh = await fetchFromCoinGecko()
+    memCache = fresh
+    if (kv) await writeToKV(kv, fresh)
+    return fresh
+  })()
 
   try {
-    const data = await promise
-    cache   = data
-    promise = null
-    return data
+    const result = await fetchPromise
+    fetchPromise = null
+    return result
   } catch (err) {
-    promise = null
-    // Return stale cache if available, otherwise hardcoded fallback
-    if (cache) return cache
-    console.error('[priceCache] CoinGecko unreachable, using fallback prices:', err)
+    fetchPromise = null
+    if (memCache) return memCache  // stale é melhor que erro
+    console.error('[priceCache] falha total, usando fallback hardcoded:', err)
     return FALLBACK
   }
 }
 
 /**
- * Convenience: get just the MON/USD price + 24h change.
- * Used by /api/mon-price and lib/monad.ts getMonPrice().
+ * Preço MON + variação 24h. Usado por /api/mon-price.
  */
-export async function getMonPriceData(): Promise<{ price: number; change24h: number; changeAmount: number }> {
+export async function getMonPriceData(): Promise<{
+  price:        number
+  change24h:    number
+  changeAmount: number
+}> {
   const data  = await getAllPrices()
   const price = data.prices['monad'] ?? FALLBACK.prices['monad']!
   const chg   = data.change24h['monad'] ?? 0
@@ -138,8 +198,8 @@ export async function getMonPriceData(): Promise<{ price: number; change24h: num
 }
 
 /**
- * Convenience: get just the MON/USD price as a number.
- * Drop-in replacement for the old getMonPrice() in lib/monad.ts.
+ * Apenas o preço MON em USD.
+ * Drop-in replacement para o antigo getMonPrice() de lib/monad.ts.
  */
 export async function getMonPrice(): Promise<number> {
   const data = await getAllPrices()
