@@ -287,7 +287,7 @@ async function loadTokensForChain(chainName: string): Promise<Token[]> {
     const data: { tokens: Token[] } = await res.json()
 
     // Apply logo overrides for known tokens, add native first
-    // PATCH: filter out tokens with null/undefined symbol or address to prevent client-side crash
+    // Guard: skip tokens with missing symbol or address to prevent client-side crash
     const tokens = data.tokens
       .filter(t => t.address && t.symbol)
       .map(t => ({
@@ -475,7 +475,7 @@ function TokenModal({ chainName, onSelect, onClose }: {
     loadTokensForChain(chainName).then(t => { setTokens(t); setLoading(false) })
   }, [chainName])
 
-  // PATCH: null-safe toLowerCase — tokens from API may have missing symbol/name/address
+  // Guard: null-safe toLowerCase — tokens from API may have missing fields
   const ql = q.toLowerCase()
   const filtered = tokens.filter(t =>
     (t.symbol  ?? '').toLowerCase().includes(ql) ||
@@ -1076,7 +1076,7 @@ export default function SwapPage() {
               ) : dstAmount ? (
                 <>
                   <span className="text-2xl font-semibold text-gray-800">{dstAmount}</span>
-                  {quote && <p className="text-xs text-gray-400 mt-0.5">≈ ${quote.estimate.destinationUsdAmount.toFixed(2)}</p>}
+                  {quote && <p className="text-xs text-gray-400 mt-0.5">≈ ${(quote.estimate.destinationUsdAmount ?? 0).toFixed(2)}</p>}
                 </>
               ) : (
                 <span className="text-2xl font-semibold text-gray-300">0.00</span>
@@ -1122,15 +1122,15 @@ export default function SwapPage() {
             {quote.estimate.priceImpact !== null && (
               <div className="flex justify-between px-4 py-2.5">
                 <span className="text-gray-500">Price impact</span>
-                <span className={`font-medium ${Math.abs(quote.estimate.priceImpact) > 3 ? 'text-red-500' : 'text-gray-700'}`}>
-                  {quote.estimate.priceImpact.toFixed(2)}%
+                <span className={`font-medium ${Math.abs(quote.estimate.priceImpact ?? 0) > 3 ? 'text-red-500' : 'text-gray-700'}`}>
+                  {(quote.estimate.priceImpact ?? 0).toFixed(2)}%
                 </span>
               </div>
             )}
             {isCrossChain && (quote.fees?.gasTokenFees?.protocol?.fixedUsdAmount ?? 0) > 0 && (
               <div className="flex justify-between px-4 py-2.5">
                 <span className="text-gray-500">Protocol fee</span>
-                <span className="font-medium text-gray-700">${quote.fees.gasTokenFees.protocol.fixedUsdAmount.toFixed(2)}</span>
+                <span className="font-medium text-gray-700">${(quote.fees?.gasTokenFees?.protocol?.fixedUsdAmount ?? 0).toFixed(2)}</span>
               </div>
             )}
             <div className="flex justify-between items-center px-4 py-2.5 relative">
