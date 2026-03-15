@@ -3,22 +3,27 @@
 import { useState, useEffect, useCallback } from 'react'
 
 interface MonadPrice {
-  price: number
-  change24h: number
+  price:        number
+  change24h:    number
   changeAmount: number
-  loading: boolean
-  error: boolean
-  lastUpdated: Date | null
+  loading:      boolean
+  error:        boolean
+  lastUpdated:  Date | null
 }
 
-export function useMonadPrice(refreshInterval = 60_000): MonadPrice {
+// Default interval aligned with priceCache TTL (5 minutes).
+// The server-side cache refreshes every 5 min — polling faster than that
+// just returns the same cached value and wastes Worker CPU + KV reads.
+const DEFAULT_INTERVAL_MS = 5 * 60 * 1000 // 5 minutes
+
+export function useMonadPrice(refreshInterval = DEFAULT_INTERVAL_MS): MonadPrice {
   const [data, setData] = useState<MonadPrice>({
-    price: 0,
-    change24h: 0,
+    price:        0,
+    change24h:    0,
     changeAmount: 0,
-    loading: true,
-    error: false,
-    lastUpdated: null,
+    loading:      true,
+    error:        false,
+    lastUpdated:  null,
   })
 
   const fetchPrice = useCallback(async () => {
