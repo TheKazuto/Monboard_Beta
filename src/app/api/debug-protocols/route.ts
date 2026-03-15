@@ -1,204 +1,231 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { rpcBatch } from '@/lib/monad'
+import { MONAD_RPC as RPC, rpcBatch, getMonPrice } from '@/lib/monad'
+import { getAllPrices } from '@/lib/priceCache'
 
 // ─── Rota de debug — REMOVER antes do deploy final ───────────────────────────
-// Acesso: GET /api/debug-uniswap?address=0x...
-// Testa cada etapa da fetchUniswapV3 e mostra o resultado raw de cada chamada RPC
+// Acesso: GET /api/debug-defi?address=0x...
+// Testa cada fetcher individualmente e expoe erros reais em vez de swallow silencioso
 
-const UNI_NFT_PM  = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53'
-const UNI_FACTORY = '0x204faca1764b154221e35c0d20abb3c525710498'
-const PCAKE_NFT_PM  = '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364'
-const PCAKE_FACTORY = '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865'
-
-function ethCall(to: string, data: string, id: number | string) {
+function ethCall(to: string, data: string, id: number) {
   return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
 }
 function balanceOfData(addr: string) {
   return '0x70a08231' + addr.slice(2).toLowerCase().padStart(64, '0')
 }
-function tokenOfOwnerByIndex(owner: string, idx: number) {
-  return '0x2f745c59' + owner.slice(2).toLowerCase().padStart(64, '0') + idx.toString(16).padStart(64, '0')
-}
-function positionsData(tokenId: bigint) {
-  return '0x99fbab88' + tokenId.toString(16).padStart(64, '0')
-}
-function getPoolSelector(t0: string, t1: string, fee: number) {
-  return '0x1698ee82'
-    + t0.slice(2).toLowerCase().padStart(64, '0')
-    + t1.slice(2).toLowerCase().padStart(64, '0')
-    + fee.toString(16).padStart(64, '0')
-}
-function decodeUint(hex: string): string {
-  if (!hex || hex === '0x') return '0'
-  try { return BigInt(hex).toString() } catch { return 'decode_error' }
+
+// ── Teste 1: RPC basico ───────────────────────────────────────────────────────
+async function testRPC() {
+  const res = await rpcBatch([{
+    jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: []
+  }])
+  return { blockNumber: res[0]?.result ?? null, error: res[0]?.error ?? null }
 }
 
-async function debugOneProtocol(label: string, nftPM: string, factory: string, user: string) {
-  const result: Record<string, any> = { nftPM, factory }
-
-  // ── STEP 1: balanceOf(user) no NFT Position Manager ───────────────────────
+// ── Teste 2: priceCache / getAllPrices ────────────────────────────────────────
+async function testPriceCache() {
   try {
-    const res = await rpcBatch([ethCall(nftPM, balanceOfData(user), 1)])
-    const raw = res[0]?.result ?? null
-    const count = raw && raw !== '0x' ? Number(BigInt(raw)) : 0
-    result.step1_nftBalance = {
-      raw,
-      rpcError: res[0]?.error ?? null,
-      nftCount: count,
-      note: count === 0 ? 'Sem posições LP neste protocolo' : `${count} posições encontradas`,
+    const data = await getAllPrices()
+    return {
+      ok: true,
+      monadPrice: data.prices['monad'] ?? null,
+      fetchedAt: new Date(data.fetchedAt).toISOString(),
+      coinCount: Object.keys(data.prices).length,
     }
-    if (count === 0) return result
   } catch (e: any) {
-    result.step1_nftBalance = { error: e?.message ?? String(e) }
-    return result
+    return { ok: false, error: e?.message ?? String(e), stack: e?.stack?.slice(0, 300) }
   }
+}
 
-  const nftCount = Number(BigInt(result.step1_nftBalance.raw))
-  const limit = Math.min(nftCount, 5) // debug: apenas 5 primeiras
-
-  // ── STEP 2: tokenOfOwnerByIndex para cada posição ─────────────────────────
+// ── Teste 3: resolveTokens (Buffer / symbol() RPC) ───────────────────────────
+async function testResolveTokens() {
+  const WMON    = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a' // should hit cache
+  const GMONAD  = '0x7db552eeb6b77a6babe6e0a739b5382cd653cc3e' // unknown, needs RPC
   try {
-    const idCalls = Array.from({ length: limit }, (_, i) =>
-      ethCall(nftPM, tokenOfOwnerByIndex(user, i), i + 10)
-    )
-    const idResults = await rpcBatch(idCalls)
-    result.step2_tokenIds = idResults.map((r: any, i: number) => ({
-      index:    i,
-      raw:      r?.result ?? null,
-      rpcError: r?.error  ?? null,
-      tokenId:  decodeUint(r?.result ?? '0x'),
-    }))
+    // Test Buffer availability
+    let bufferTest = 'unknown'
+    try {
+      bufferTest = Buffer.from('474d4f4e4144', 'hex').toString('utf8')
+    } catch (be: any) {
+      bufferTest = 'Buffer ERROR: ' + be.message
+    }
+
+    // Test symbol() call directly
+    const calls = [
+      ethCall(GMONAD, '0x95d89b41', 0), // symbol()
+      ethCall(GMONAD, '0x313ce567', 1), // decimals()
+    ]
+    const results = await rpcBatch(calls)
+    const symRaw = results[0]?.result ?? ''
+    const decRaw = results[1]?.result ?? ''
+
+    // Try decoding symbol
+    let decodedSymbol = 'failed'
+    try {
+      const d = symRaw.startsWith('0x') ? symRaw.slice(2) : symRaw
+      if (d.length >= 128) {
+        const len = parseInt(d.slice(64, 128), 16)
+        if (len > 0 && len <= 100) {
+          const str = d.slice(128, 128 + len * 2)
+          decodedSymbol = Buffer.from(str, 'hex').toString('utf8').replace(/\0/g, '').trim()
+        } else {
+          decodedSymbol = `len=${len} out of range`
+        }
+      } else {
+        decodedSymbol = `raw too short: ${d.length} chars`
+      }
+    } catch (de: any) {
+      decodedSymbol = 'decode ERROR: ' + de.message
+    }
+
+    return {
+      bufferAvailable: bufferTest,
+      WMON_inCache: true,
+      GMONAD_symbolRaw: symRaw,
+      GMONAD_decimalsRaw: decRaw,
+      GMONAD_decodedSymbol: decodedSymbol,
+      GMONAD_rpcError0: results[0]?.error ?? null,
+      GMONAD_rpcError1: results[1]?.error ?? null,
+    }
   } catch (e: any) {
-    result.step2_tokenIds = { error: e?.message ?? String(e) }
-    return result
+    return { error: e?.message ?? String(e), stack: e?.stack?.slice(0, 300) }
   }
+}
 
-  const tokenIds = result.step2_tokenIds
-    .filter((t: any) => t.raw && t.raw !== '0x' && t.raw !== '0x' + '0'.repeat(64))
-    .map((t: any) => BigInt(t.raw))
-
-  if (tokenIds.length === 0) {
-    result.step2_tokenIds_note = 'Nenhum tokenId válido retornado'
-    return result
-  }
-
-  // ── STEP 3: positions(tokenId) para cada NFT ──────────────────────────────
+// ── Teste 4: Neverland (getUserAccountData + getReserveData) ─────────────────
+async function testNeverland(user: string) {
+  const POOL = '0x80F00661b13CC5F6ccd3885bE7b4C9c67545D585'
+  const WMON = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a'
   try {
-    const posCalls = tokenIds.map((id: bigint, i: number) =>
-      ethCall(nftPM, positionsData(id), i + 200)
-    )
-    const posResults = await rpcBatch(posCalls)
+    const paddedUser = user.slice(2).toLowerCase().padStart(64, '0')
+    const results = await rpcBatch([
+      ethCall(POOL, '0xbf92857c' + paddedUser, 'acct'),
+      ethCall(POOL, '0x35ea6a75' + WMON.slice(2).padStart(64, '0'), 'reserve'),
+    ])
+    const acctRaw    = results.find((r: any) => r.id === 'acct')?.result  ?? null
+    const reserveRaw = results.find((r: any) => r.id === 'reserve')?.result ?? null
 
-    result.step3_positions = posResults.map((r: any, i: number) => {
-      const hex = r?.result ?? ''
-      const d   = hex.slice(2)
-      if (!d || d.length < 64 * 8) return {
-        tokenId:  tokenIds[i].toString(),
-        raw:      hex,
-        rpcError: r?.error ?? null,
-        note:     'Resposta muito curta ou vazia',
-      }
-      const w        = Array.from({ length: 12 }, (_, j) => d.slice(j * 64, (j + 1) * 64))
-      const token0   = '0x' + w[2].slice(24)
-      const token1   = '0x' + w[3].slice(24)
-      const fee      = parseInt(w[4], 16)
-      const tickLRaw = parseInt(w[5], 16)
-      const tickURaw = parseInt(w[6], 16)
-      const tickL    = tickLRaw > 0x7fffffff ? tickLRaw - 0x100000000 : tickLRaw
-      const tickU    = tickURaw > 0x7fffffff ? tickURaw - 0x100000000 : tickURaw
-      const liq      = BigInt('0x' + w[7])
-      return {
-        tokenId:    tokenIds[i].toString(),
-        rpcError:   r?.error ?? null,
-        token0,
-        token1,
-        fee,
-        tickLower:  tickL,
-        tickUpper:  tickU,
-        liquidity:  liq.toString(),
-        hasLiquidity: liq > 0n,
-        note: liq === 0n ? '⚠ Liquidity = 0 — posição fechada/removida' : '✓ Posição ativa',
-      }
-    })
+    let totalCollateralUSD = 0
+    if (acctRaw && acctRaw !== '0x') {
+      totalCollateralUSD = Number(BigInt('0x' + acctRaw.slice(2, 66))) / 1e8
+    }
+
+    let aTokenFromReserve = null
+    if (reserveRaw && reserveRaw !== '0x' && reserveRaw.length >= 2 + 11 * 64) {
+      const slots = Array.from({ length: 12 }, (_, j) => reserveRaw.slice(2 + j * 64, 2 + (j + 1) * 64))
+      aTokenFromReserve = '0x' + slots[8].slice(24)
+    }
+
+    return {
+      acctRaw_first64: acctRaw?.slice(0, 66) ?? null,
+      totalCollateralUSD,
+      aTokenFromReserve,
+      acctError: results.find((r: any) => r.id === 'acct')?.error ?? null,
+      reserveError: results.find((r: any) => r.id === 'reserve')?.error ?? null,
+    }
   } catch (e: any) {
-    result.step3_positions = { error: e?.message ?? String(e) }
-    return result
+    return { error: e?.message ?? String(e), stack: e?.stack?.slice(0, 300) }
   }
+}
 
-  const activePositions = result.step3_positions.filter((p: any) => p.hasLiquidity)
-  if (activePositions.length === 0) {
-    result.step3_note = 'Todas as posições têm liquidity = 0 (fechadas). Nada para mostrar.'
-    return result
-  }
-
-  // ── STEP 4: getPool(t0, t1, fee) no factory para cada posição ativa ────────
+// ── Teste 5: Uniswap V3 passo a passo ────────────────────────────────────────
+async function testUniswap(user: string) {
+  const NFT_PM  = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53'
+  const FACTORY = '0x204faca1764b154221e35c0d20abb3c525710498'
   try {
-    const poolCalls = activePositions.map((p: any, i: number) =>
-      ethCall(factory, getPoolSelector(p.token0, p.token1, p.fee), i + 500)
+    // balanceOf
+    const balRes = await rpcBatch([ethCall(NFT_PM, balanceOfData(user), 1)])
+    const nftCountRaw = balRes[0]?.result ?? '0x0'
+    const nftCount = Number(BigInt(nftCountRaw))
+
+    if (nftCount === 0) return { nftCount: 0, note: 'Sem posicoes' }
+
+    // tokenOfOwnerByIndex(0)
+    const idCall = ethCall(
+      NFT_PM,
+      '0x2f745c59' + user.slice(2).toLowerCase().padStart(64, '0') + '0'.padStart(64, '0'),
+      10
     )
-    const poolResults = await rpcBatch(poolCalls)
+    const idRes   = await rpcBatch([idCall])
+    const tokenId = idRes[0]?.result ?? null
+    const tokenIdNum = tokenId ? Number(BigInt(tokenId)) : null
 
-    result.step4_poolAddresses = poolResults.map((r: any, i: number) => {
-      const raw = r?.result ?? null
-      const poolAddr = raw && raw !== '0x' ? ('0x' + raw.slice(2).slice(-40)) : null
-      const isZero = poolAddr === '0x0000000000000000000000000000000000000000'
-      return {
-        position: i,
-        raw,
-        rpcError: r?.error ?? null,
-        poolAddress: poolAddr,
-        valid: !!poolAddr && !isZero,
-        note: isZero ? '⚠ Pool não encontrada no factory — endereços de token ou factory incorretos' : '✓',
+    if (!tokenIdNum) return { nftCount, tokenId: null, error: 'tokenId invalido' }
+
+    // positions(tokenId)
+    const posCall = ethCall(NFT_PM, '0x99fbab88' + tokenIdNum.toString(16).padStart(64, '0'), 200)
+    const posRes  = await rpcBatch([posCall])
+    const posRaw  = posRes[0]?.result ?? null
+    const d       = posRaw?.slice(2) ?? ''
+
+    let parsedPos: any = { raw_length: d.length }
+    if (d.length >= 64 * 8) {
+      const w         = Array.from({ length: 12 }, (_, j) => d.slice(j * 64, (j + 1) * 64))
+      const token0    = '0x' + w[2].slice(24)
+      const token1    = '0x' + w[3].slice(24)
+      const fee       = parseInt(w[4], 16)
+      const tL        = parseInt(w[5], 16)
+      const tU        = parseInt(w[6], 16)
+      const tickLower = tL > 0x7fffffff ? tL - 0x100000000 : tL
+      const tickUpper = tU > 0x7fffffff ? tU - 0x100000000 : tU
+      const liquidity = BigInt('0x' + w[7])
+      parsedPos = { token0, token1, fee, tickLower, tickUpper, liquidity: liquidity.toString(), hasLiquidity: liquidity > 0n }
+
+      // getPool
+      const poolCall = ethCall(
+        FACTORY,
+        '0x1698ee82' + token0.slice(2).toLowerCase().padStart(64, '0') + token1.slice(2).toLowerCase().padStart(64, '0') + fee.toString(16).padStart(64, '0'),
+        500
+      )
+      const poolRes     = await rpcBatch([poolCall])
+      const poolAddrRaw = poolRes[0]?.result ?? null
+      const poolAddr    = poolAddrRaw ? '0x' + poolAddrRaw.slice(2).slice(-40) : null
+      parsedPos.poolAddress = poolAddr
+      parsedPos.poolError   = poolRes[0]?.error ?? null
+
+      if (poolAddr && poolAddr !== '0x0000000000000000000000000000000000000000') {
+        // slot0
+        const s0Res = await rpcBatch([ethCall(poolAddr, '0x3850c7bd', 600)])
+        const s0Raw = s0Res[0]?.result ?? null
+        if (s0Raw && s0Raw.length >= 10) {
+          const s0d = s0Raw.slice(2)
+          const s0w = Array.from({ length: 4 }, (_, j) => s0d.slice(j * 64, (j + 1) * 64))
+          const ct  = parseInt(s0w[1], 16)
+          const currentTick = ct > 0x7fffffff ? ct - 0x100000000 : ct
+          parsedPos.currentTick = currentTick
+          parsedPos.inRange     = currentTick >= tickLower && currentTick <= tickUpper
+          parsedPos.sqrtPriceX96_prefix = '0x' + s0w[0].slice(0, 16)
+        }
+        parsedPos.slot0Error = s0Res[0]?.error ?? null
       }
-    })
+    }
+
+    return { nftCount, tokenId: tokenIdNum, position: parsedPos }
   } catch (e: any) {
-    result.step4_poolAddresses = { error: e?.message ?? String(e) }
-    return result
+    return { error: e?.message ?? String(e), stack: e?.stack?.slice(0, 300) }
   }
+}
 
-  const validPools = result.step4_poolAddresses.filter((p: any) => p.valid)
-  if (validPools.length === 0) {
-    result.step4_note = 'Nenhuma pool válida retornada pelo factory'
-    return result
+// ── Teste 6: getTokenPricesUSD com simbolos conhecidos e desconhecidos ────────
+async function testPrices() {
+  const SYMBOL_TO_COINGECKO: Record<string, string> = {
+    WMON: 'monad', WETH: 'ethereum', WBTC: 'wrapped-bitcoin',
+    USDC: 'usd-coin', USDT0: 'tether', AUSD: 'agora-dollar',
   }
-
-  // ── STEP 5: slot0() em cada pool para obter currentTick ───────────────────
   try {
-    const slot0Calls = validPools.map((p: any, i: number) =>
-      ethCall(p.poolAddress, '0x3850c7bd', i + 600)
-    )
-    const slot0Results = await rpcBatch(slot0Calls)
-
-    result.step5_slot0 = slot0Results.map((r: any, i: number) => {
-      const hex = r?.result ?? ''
-      const d   = hex.slice(2)
-      if (!d || d.length < 64 * 2) return {
-        pool: validPools[i].poolAddress,
-        raw: hex, rpcError: r?.error ?? null, note: 'Resposta vazia',
+    const { prices } = await getAllPrices()
+    const symbolsToTest = ['WMON', 'USDC', 'UNKNOWNSYMBOL']
+    const result: Record<string, any> = {}
+    for (const sym of symbolsToTest) {
+      const id = SYMBOL_TO_COINGECKO[sym]
+      result[sym] = {
+        coingeckoId: id ?? 'not mapped',
+        price: id ? (prices[id] ?? 'not in prices') : 'no mapping',
       }
-      const w      = Array.from({ length: 4 }, (_, j) => d.slice(j * 64, (j + 1) * 64))
-      const ctRaw  = parseInt(w[1], 16)
-      const currentTick = ctRaw > 0x7fffffff ? ctRaw - 0x100000000 : ctRaw
-      const pos    = activePositions[i]
-      const inRange = pos
-        ? (currentTick >= pos.tickLower && currentTick <= pos.tickUpper)
-        : null
-      return {
-        pool:         validPools[i].poolAddress,
-        rpcError:     r?.error ?? null,
-        sqrtPriceX96: '0x' + w[0],
-        currentTick,
-        tickLower:    pos?.tickLower,
-        tickUpper:    pos?.tickUpper,
-        inRange,
-        note: inRange === null ? '?' : inRange ? '✓ Em range' : '⚠ Fora do range',
-      }
-    })
+    }
+    return result
   } catch (e: any) {
-    result.step5_slot0 = { error: e?.message ?? String(e) }
+    return { error: e?.message ?? String(e) }
   }
-
-  return result
 }
 
 export async function GET(req: NextRequest) {
@@ -207,14 +234,25 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Pass ?address=0x...' }, { status: 400 })
   }
 
-  const [uni, pcake] = await Promise.allSettled([
-    debugOneProtocol('Uniswap V3',    UNI_NFT_PM,   UNI_FACTORY,   address),
-    debugOneProtocol('PancakeSwap V3', PCAKE_NFT_PM, PCAKE_FACTORY, address),
+  const [rpc, priceCache, tokens, neverland, uniswap, prices] = await Promise.allSettled([
+    testRPC(),
+    testPriceCache(),
+    testResolveTokens(),
+    testNeverland(address),
+    testUniswap(address),
+    testPrices(),
   ])
+
+  const unwrap = (r: PromiseSettledResult<any>) =>
+    r.status === 'fulfilled' ? r.value : { PROMISE_REJECTED: r.reason?.message ?? String(r.reason) }
 
   return NextResponse.json({
     address,
-    uniswapV3:    uni.status    === 'fulfilled' ? uni.value    : { error: uni.reason },
-    pancakeswapV3: pcake.status === 'fulfilled' ? pcake.value  : { error: pcake.reason },
+    test1_rpc:        unwrap(rpc),
+    test2_priceCache: unwrap(priceCache),
+    test3_resolveTokens: unwrap(tokens),
+    test4_neverland:  unwrap(neverland),
+    test5_uniswap:    unwrap(uniswap),
+    test6_prices:     unwrap(prices),
   })
 }
