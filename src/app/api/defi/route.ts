@@ -67,88 +67,133 @@ async function getTokenPricesUSD(symbols: string[]): Promise<Record<string, numb
 }
 
 // ─── NEVERLAND (Aave V3 fork) — supply & borrow positions ───────────────────
+// Os endereços hardcoded dos aTokens/debtTokens estavam incorretos (retornavam 0x).
+// Correção: descobre os endereços dinamicamente via getReserveData(underlying)
+//   slot[8]  = aTokenAddress
+//   slot[10] = variableDebtTokenAddress
+// Garante compatibilidade mesmo após upgrades de contratos do protocolo.
+
 const NEVERLAND_POOL = '0x80F00661b13CC5F6ccd3885bE7b4C9c67545D585'
 
-const NEVERLAND_NTOKENS: Record<string, { symbol: string; decimals: number }> = {
-  '0xFDE1d58a35EB78D84571D2cd99A04d6f91B51aD5': { symbol: 'WMON',  decimals: 18 },
-  '0x1a9f2B5f8cA3951bCDA51C0B3FceFEd4C3Dbe56b': { symbol: 'WBTC',  decimals: 8  },
-  '0x93Dd76d3c24Aa0A3f2d5d44693c3B4DfF800B8fD': { symbol: 'WETH',  decimals: 18 },
-  '0x36d0E7B9CbD6dd3Ec0aCcB27B54EF0A03e7a1E50': { symbol: 'AUSD',  decimals: 18 },
-  '0xF0f7e3F3b09B45a13cBDfaDD88dbBf0dc59B8A53': { symbol: 'USDC',  decimals: 6  },
-  '0xf9a56d43dB6cFDe71d4b43b450E7a7A7e691e11F': { symbol: 'USDT0', decimals: 6  },
-  '0xdFC14d336aea9E49113b1356333FD374e646Bf85': { symbol: 'sMON',  decimals: 18 },
-  '0x7f81779736968836582D31D36274Ed82053aD1AE': { symbol: 'gMON',  decimals: 18 },
-  '0xC64d73Bb8748C6fA7487ace2D0d945B6fBb2EcDe': { symbol: 'shMON', decimals: 18 },
-}
-const NEVERLAND_DEBT_TOKENS: Record<string, { symbol: string; decimals: number }> = {
-  '0x3acA285b9F57832fF55f1e6835966890845c1526': { symbol: 'WMON',  decimals: 18 },
-  '0x544a5fF071090F4eE3AD879435f4dC1C1eeC1873': { symbol: 'WBTC',  decimals: 8  },
-  '0xdE6C157e43c5d9B713C635f439a93CA3BE2156B6': { symbol: 'WETH',  decimals: 18 },
-  '0x54fC077EAe1006FE3C5d01f1614802eAFCbEe57E': { symbol: 'AUSD',  decimals: 18 },
-  '0xb26FB5e35f6527d6f878F7784EA71774595B249C': { symbol: 'USDC',  decimals: 6  },
-  '0xa2d753458946612376ce6e5704Ab1cc79153d272': { symbol: 'USDT0', decimals: 6  },
-}
+// Underlying assets — endereços dos ERC-20 reais (estes estão corretos)
+const NEVERLAND_UNDERLYING: Array<{ address: string; symbol: string; decimals: number }> = [
+  { address: '0x3bd359c1119da7da1d913d1c4d2b7c461115433a', symbol: 'WMON',  decimals: 18 },
+  { address: '0x0555e30da8f98308edb960aa94c0db47230d2b9c', symbol: 'WBTC',  decimals: 8  },
+  { address: '0xee8c0e9f1bffb4eb878d8f15f368a02a35481242', symbol: 'WETH',  decimals: 18 },
+  { address: '0x00000000efe302beaa2b3e6e1b18d08d69a9012a', symbol: 'AUSD',  decimals: 18 },
+  { address: '0x754704bc059f8c67012fed69bc8a327a5aafb603', symbol: 'USDC',  decimals: 6  },
+  { address: '0xe7cd86e13ac4309349f30b3435a9d337750fc82d', symbol: 'USDT0', decimals: 6  },
+  { address: '0xa3227c5969757783154c60bf0bc1944180ed81b9', symbol: 'sMON',  decimals: 18 },
+  { address: '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081', symbol: 'gMON',  decimals: 18 },
+  { address: '0x1b68626dca36c7fe922fd2d55e4f631d962de19c', symbol: 'shMON', decimals: 18 },
+]
 
 async function fetchNeverland(user: string): Promise<any[]> {
-  const supplyAddrs = Object.keys(NEVERLAND_NTOKENS)
-  const debtAddrs   = Object.keys(NEVERLAND_DEBT_TOKENS)
-  const allAddrs    = [...supplyAddrs, ...debtAddrs]
-  const calls = allAddrs.map((a, i) => ethCall(a, balanceOfData(user), i + 100))
-  calls.push(ethCall(NEVERLAND_POOL, '0xbf92857c' + user.slice(2).toLowerCase().padStart(64, '0'), 999))
-  let results: any[]
-  try { results = await rpcBatch(calls) } catch { return [] }
+  const paddedUser = user.slice(2).toLowerCase().padStart(64, '0')
 
-  const acctRes = results.find((r: any) => r.id === 999)
-  let totalCollateralUSD = 0, totalDebtUSD = 0, healthFactor = null
-  if (acctRes?.result && acctRes.result !== '0x') {
-    const hex = acctRes.result.slice(2)
-    const w = Array.from({ length: 6 }, (_, i) => hex.slice(i * 64, (i + 1) * 64))
-    totalCollateralUSD = Number(BigInt('0x' + w[0])) / 1e8
-    totalDebtUSD       = Number(BigInt('0x' + w[1])) / 1e8
-    const liqThreshold = Number(BigInt('0x' + w[3])) / 10000
-    const debtBase = Number(BigInt('0x' + w[1]))
-    if (debtBase > 0) {
-      const collBase = Number(BigInt('0x' + w[0]))
-      healthFactor = (collBase * liqThreshold) / debtBase
-    } else {
-      healthFactor = 999
+  try {
+    // ── Round 1: getReserveData para cada asset + getUserAccountData ──────────
+    // Tudo em um único rpcBatch — sem round-trips extras
+    const reserveCalls = NEVERLAND_UNDERLYING.map((a, i) =>
+      ethCall(
+        NEVERLAND_POOL,
+        '0x35ea6a75' + a.address.slice(2).toLowerCase().padStart(64, '0'),
+        i
+      )
+    )
+    reserveCalls.push(ethCall(NEVERLAND_POOL, '0xbf92857c' + paddedUser, 999))
+
+    const reserveResults = await rpcBatch(reserveCalls)
+
+    // ── Descobre endereços dinâmicos dos aTokens e debtTokens ─────────────────
+    const discovered: Array<{
+      underlying: typeof NEVERLAND_UNDERLYING[0]
+      aToken:     string
+      debtToken:  string
+    }> = []
+
+    for (let i = 0; i < NEVERLAND_UNDERLYING.length; i++) {
+      const hex = (reserveResults[i]?.result ?? '').slice(2)
+      if (!hex || hex.length < 11 * 64) continue
+      const slots = Array.from({ length: 12 }, (_, j) => hex.slice(j * 64, (j + 1) * 64))
+      const aToken    = '0x' + slots[8].slice(24)
+      const debtToken = '0x' + slots[10].slice(24)
+      if (aToken === '0x0000000000000000000000000000000000000000') continue
+      discovered.push({ underlying: NEVERLAND_UNDERLYING[i], aToken, debtToken })
     }
-  }
 
-  const supplyList: any[] = []
-  const borrowList: any[] = []
-  supplyAddrs.forEach((addr, i) => {
-    const bal = decodeUint(results.find((r: any) => r.id === i + 100)?.result ?? '0x')
-    if (bal === 0n) return
-    const info = NEVERLAND_NTOKENS[addr]
-    const amount = Number(bal) / Math.pow(10, info.decimals)
-    if (amount >= 0.001) supplyList.push({ symbol: info.symbol, amount })
-  })
-  debtAddrs.forEach((addr, i) => {
-    const bal = decodeUint(results.find((r: any) => r.id === (supplyAddrs.length + i) + 100)?.result ?? '0x')
-    if (bal === 0n) return
-    const info = NEVERLAND_DEBT_TOKENS[addr]
-    const amount = Number(bal) / Math.pow(10, info.decimals)
-    if (amount >= 0.001) borrowList.push({ symbol: info.symbol, amount })
-  })
+    if (discovered.length === 0) return []
 
-  if (!supplyList.length && !borrowList.length) return []
+    // ── Decodifica dados da conta ─────────────────────────────────────────────
+    let totalCollateralUSD = 0
+    let totalDebtUSD       = 0
+    let healthFactor: number | null = null
 
-  const allSymbols = [...new Set([...supplyList.map(s => s.symbol), ...borrowList.map(b => b.symbol)])]
-  const prices = await getTokenPricesUSD(allSymbols)
+    const acctRaw = reserveResults.find((r: any) => r.id === 999)?.result ?? null
+    if (acctRaw && acctRaw !== '0x' && acctRaw.length > 10) {
+      const hex = acctRaw.slice(2)
+      const w   = Array.from({ length: 6 }, (_, i) => hex.slice(i * 64, (i + 1) * 64))
+      totalCollateralUSD = Number(BigInt('0x' + w[0])) / 1e8
+      totalDebtUSD       = Number(BigInt('0x' + w[1])) / 1e8
+      const hfRaw   = BigInt('0x' + w[5])
+      const MAX_U256 = BigInt('0x' + 'f'.repeat(64))
+      // healthFactor 0xfff...fff = sem dívida (infinito) → exibir null na UI
+      healthFactor = hfRaw === MAX_U256 ? null : Number(hfRaw) / 1e18
+    }
 
-  const supply = supplyList.map(s => ({ ...s, amountUSD: s.amount * (prices[s.symbol] ?? 0) }))
-  const borrow = borrowList.map(b => ({ ...b, amountUSD: b.amount * (prices[b.symbol] ?? 0) }))
+    if (totalCollateralUSD < 0.01 && totalDebtUSD < 0.01) return []
 
-  return [{
-    protocol: 'Neverland', type: 'lending', logo: '🧚',
-    url: 'https://neverland.finance', chain: 'Monad',
-    label: 'Neverland Position',
-    supply, borrow,
-    totalCollateralUSD, totalDebtUSD,
-    netValueUSD: totalCollateralUSD - totalDebtUSD,
-    healthFactor,
-  }]
+    // ── Round 2: balanceOf nos endereços descobertos ──────────────────────────
+    const balCalls: object[] = []
+    discovered.forEach(({ aToken, debtToken }, i) => {
+      balCalls.push(ethCall(aToken,    balanceOfData(user), i * 2))
+      balCalls.push(ethCall(debtToken, balanceOfData(user), i * 2 + 1))
+    })
+
+    const balResults = await rpcBatch(balCalls)
+
+    // ── Monta listas de supply e borrow ───────────────────────────────────────
+    const supplyList: Array<{ symbol: string; amount: number; amountUSD: number }> = []
+    const borrowList: Array<{ symbol: string; amount: number; amountUSD: number }> = []
+
+    const prices = await getTokenPricesUSD(discovered.map(d => d.underlying.symbol))
+
+    discovered.forEach(({ underlying }, i) => {
+      const aBal = decodeUint(balResults.find((r: any) => r.id === i * 2)?.result     ?? '0x')
+      const dBal = decodeUint(balResults.find((r: any) => r.id === i * 2 + 1)?.result ?? '0x')
+      const price  = prices[underlying.symbol] ?? 0
+      const factor = Math.pow(10, underlying.decimals)
+
+      if (aBal > 0n) {
+        const amount = Number(aBal) / factor
+        if (amount >= 0.0001) supplyList.push({ symbol: underlying.symbol, amount, amountUSD: amount * price })
+      }
+      if (dBal > 0n) {
+        const amount = Number(dBal) / factor
+        if (amount >= 0.0001) borrowList.push({ symbol: underlying.symbol, amount, amountUSD: amount * price })
+      }
+    })
+
+    // Fallback: se balanceOf não retornou saldo mas getUserAccountData mostra
+    // collateral, cria entrada sintética para não ocultar a posição da UI
+    if (supplyList.length === 0 && totalCollateralUSD > 0.01) {
+      supplyList.push({ symbol: '?', amount: 0, amountUSD: totalCollateralUSD })
+    }
+
+    if (supplyList.length === 0 && borrowList.length === 0) return []
+
+    return [{
+      protocol: 'Neverland', type: 'lending', logo: '🧚',
+      url:      'https://app.neverland.money', chain: 'Monad',
+      label:    'Neverland Position',
+      supply:   supplyList,
+      borrow:   borrowList,
+      totalCollateralUSD,
+      totalDebtUSD,
+      netValueUSD:  totalCollateralUSD - totalDebtUSD,
+      healthFactor,
+    }]
+  } catch { return [] }
 }
 
 // ─── MORPHO ───────────────────────────────────────────────────────────────────
