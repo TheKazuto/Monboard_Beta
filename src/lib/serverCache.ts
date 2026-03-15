@@ -10,6 +10,13 @@
 
 import { getCloudflareContext } from '@opennextjs/cloudflare'
 
+// Interface mínima do KV binding — evita dependência do tipo global KVNamespace
+// que não está disponível durante o build do Next.js
+interface KVStore {
+  get(key: string): Promise<string | null>
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>
+}
+
 interface CacheEntry<T> {
   data:      T
   fetchedAt: number
@@ -21,10 +28,13 @@ const store = new Map<string, CacheEntry<any>>()
 
 // ─── L2 — Cloudflare Workers KV ──────────────────────────────────────────────
 
-function getKV(): KVNamespace | null {
+function getKV(): KVStore | null {
   try {
     const ctx = getCloudflareContext()
-    return (ctx?.env as CloudflareEnv | undefined)?.PRICE_KV ?? null
+    const env = ctx?.env as Record<string, unknown> | undefined
+    const kv  = env?.PRICE_KV
+    if (kv && typeof (kv as any).get === 'function') return kv as KVStore
+    return null
   } catch {
     // Fora do contexto de request (ex: build time) — silencioso
     return null

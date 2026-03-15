@@ -10,6 +10,13 @@
 
 import { getCloudflareContext } from '@opennextjs/cloudflare'
 
+// Interface mínima do KV binding — evita dependência do tipo global KVNamespace
+// que não está disponível durante o build do Next.js
+interface KVStore {
+  get(key: string): Promise<string | null>
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>
+}
+
 // ─── Master coin list ─────────────────────────────────────────────────────────
 export const ALL_COIN_IDS = [
   'monad',           // MON / WMON / sMON / gMON / shMON / aprMON
@@ -56,21 +63,20 @@ let fetchPromise: Promise<PriceData> | null = null
 // ─── L2 — Cloudflare Workers KV ──────────────────────────────────────────────
 const KV_KEY = 'prices:all'
 
-/**
- * Retorna o KV binding ou null se não estiver disponível
- * (build time, desenvolvimento local sem wrangler, etc.)
- */
-function getKV(): KVNamespace | null {
+function getKV(): KVStore | null {
   try {
     const ctx = getCloudflareContext()
-    return (ctx?.env as CloudflareEnv | undefined)?.PRICE_KV ?? null
+    const env = ctx?.env as Record<string, unknown> | undefined
+    const kv  = env?.PRICE_KV
+    if (kv && typeof (kv as any).get === 'function') return kv as KVStore
+    return null
   } catch {
     // getCloudflareContext lança fora de um request ativo (ex: build time)
     return null
   }
 }
 
-async function readFromKV(kv: KVNamespace): Promise<PriceData | null> {
+async function readFromKV(kv: KVStore): Promise<PriceData | null> {
   try {
     const raw = await kv.get(KV_KEY)
     if (!raw) return null
@@ -82,11 +88,10 @@ async function readFromKV(kv: KVNamespace): Promise<PriceData | null> {
   }
 }
 
-async function writeToKV(kv: KVNamespace, data: PriceData): Promise<void> {
+async function writeToKV(kv: KVStore, data: PriceData): Promise<void> {
   try {
     await kv.put(KV_KEY, JSON.stringify(data), { expirationTtl: TTL_SEC })
   } catch (err) {
-    // Falha de escrita não deve quebrar a resposta ao usuário
     console.error('[priceCache] KV write failed:', err)
   }
 }
@@ -143,7 +148,7 @@ export async function getAllPrices(): Promise<PriceData> {
     if (kv) {
       const kvData = await readFromKV(kv)
       if (kvData && now - kvData.fetchedAt < TTL_MS) {
-        memCache = kvData  // aquece L1 com dado do KV
+        memCache = kvData
         return kvData
       }
     }
@@ -161,7 +166,7 @@ export async function getAllPrices(): Promise<PriceData> {
     return result
   } catch (err) {
     fetchPromise = null
-    if (memCache) return memCache  // stale é melhor que erro
+    if (memCache) return memCache
     console.error('[priceCache] falha total, usando fallback hardcoded:', err)
     return FALLBACK
   }
