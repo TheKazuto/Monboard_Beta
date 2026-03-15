@@ -881,25 +881,39 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid address' }, { status: 400 })
   }
 
+  const debugMode = req.nextUrl.searchParams.get('debug') === '1'
+
   const [monPriceR] = await Promise.allSettled([getMonPrice()])
   const MON_PRICE = monPriceR.status === 'fulfilled' ? (monPriceR.value as number) : 0
 
+  // Wraps each fetcher: in debug mode exposes errors, otherwise silently returns []
+  async function safeFetch(name: string, fn: () => Promise<any[]>): Promise<any[]> {
+    try {
+      return await fn()
+    } catch (e: any) {
+      if (debugMode) {
+        return [{ __debugError: true, protocol: name, error: e?.message ?? String(e), stack: (e?.stack ?? '').slice(0, 400) }]
+      }
+      return []
+    }
+  }
+
   const [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, kintsuR, magmaR, shmonadR, lagoonR, kuruR, curvanceR, eulerR] =
     await Promise.allSettled([
-      fetchNeverland(address),
-      fetchMorpho(address),
-      fetchUniswapV3(address, 'Uniswap V3',    UNI_NFT_PM, UNI_FACTORY),
-      fetchUniswapV3(address, 'PancakeSwap V3', '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364', '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865'),
-      fetchCurve(address),
-      fetchGearbox(address),
-      fetchUpshift(address),
-      fetchKintsu(address, MON_PRICE),
-      fetchMagma(address, MON_PRICE),
-      fetchShMonad(address, MON_PRICE),
-      fetchLagoon(address),
-      fetchKuru(address),
-      fetchCurvance(address),
-      fetchEulerV2(address),
+      safeFetch('Neverland',     () => fetchNeverland(address)),
+      safeFetch('Morpho',        () => fetchMorpho(address)),
+      safeFetch('UniswapV3',     () => fetchUniswapV3(address, 'Uniswap V3',    UNI_NFT_PM, UNI_FACTORY)),
+      safeFetch('PancakeswapV3', () => fetchUniswapV3(address, 'PancakeSwap V3', '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364', '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865')),
+      safeFetch('Curve',         () => fetchCurve(address)),
+      safeFetch('Gearbox',       () => fetchGearbox(address)),
+      safeFetch('Upshift',       () => fetchUpshift(address)),
+      safeFetch('Kintsu',        () => fetchKintsu(address, MON_PRICE)),
+      safeFetch('Magma',         () => fetchMagma(address, MON_PRICE)),
+      safeFetch('ShMonad',       () => fetchShMonad(address, MON_PRICE)),
+      safeFetch('Lagoon',        () => fetchLagoon(address)),
+      safeFetch('Kuru',          () => fetchKuru(address)),
+      safeFetch('Curvance',      () => fetchCurvance(address)),
+      safeFetch('EulerV2',       () => fetchEulerV2(address)),
     ])
 
   function unwrap(r: PromiseSettledResult<any[]>): any[] {
