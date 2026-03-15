@@ -16,5 +16,12 @@
       "binding": "WORKER_SELF_REFERENCE",
       "service": "monboardbeta"
     }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "PRICE_KV",
+      "id": "678c20e54c484254ae783c21f98b3f2b",
+      "preview_id": "97ce1b9d2f0d45ef81ce9b83a9ef0938"
+    }
   ]
 }
