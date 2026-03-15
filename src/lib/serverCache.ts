@@ -31,9 +31,8 @@ const store = new Map<string, CacheEntry<any>>()
 function getKV(): KVStore | null {
   try {
     const ctx = getCloudflareContext()
-    const env = ctx?.env as Record<string, unknown> | undefined
-    const kv  = env?.PRICE_KV
-    if (kv && typeof (kv as any).get === 'function') return kv as KVStore
+    const kv  = (ctx?.env as any)?.PRICE_KV
+    if (kv && typeof kv.get === 'function') return kv as KVStore
     return null
   } catch {
     // Fora do contexto de request (ex: build time) — silencioso
