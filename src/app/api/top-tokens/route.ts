@@ -3,8 +3,9 @@ import { cached } from '@/lib/serverCache'
 
 export const dynamic = 'force-dynamic'
 
-// Increased from 60s to 5 minutes — market cap rankings don't change every minute.
-const CACHE_TTL = 5 * 60 * 1000
+// Increased from 5 minutes to 30 minutes — market cap rankings change at most
+// a few times per day. 30 minutes is well within acceptable freshness for a dashboard widget.
+const CACHE_TTL = 30 * 60 * 1000 // 30 minutes
 
 export async function GET() {
   try {
