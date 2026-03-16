@@ -545,6 +545,14 @@ async function fetchCurve(user: string): Promise<any[]> {
 // ─── GEARBOX ──────────────────────────────────────────────────────────────────
 const GEARBOX_STATIC_URL = 'https://state-cache.gearbox.foundation/Monad.json'
 
+const GEARBOX_TOKEN_MAP: Record<string, { token: string; isStable: boolean }> = {
+  '0x34752948b0dc28969485df2066ffe86d5dc36689': { token: 'WMON', isStable: false },
+  '0x09ca6b76276ec0682adb896418b99cb7e44a58a0': { token: 'WMON', isStable: false },
+  '0x6b343f7b797f1488aa48c49d540690f2b2c89751': { token: 'USDC', isStable: true  },
+  '0xc4173359087ce643235420b7bc610d9b0cf2b82d': { token: 'AUSD', isStable: true  },
+  '0x164a35f31e4e0f6c45d500962a6978d2cbd5a16b': { token: 'USDT', isStable: true  },
+}
+
 async function fetchGearbox(user: string): Promise<any[]> {
   try {
     const res = await fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
