@@ -458,115 +458,85 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
 
 // ─── CURVE ────────────────────────────────────────────────────────────────────
 async function fetchCurve(user: string): Promise<any[]> {
-  const BASE = 'https://api-core.curve.finance/v1'
-  const addr = user.toLowerCase()
-  const paddedAddr = addr.slice(2).padStart(64, '0')
+  const BASE        = 'https://api-core.curve.finance/v1'
+  const paddedAddr  = user.slice(2).toLowerCase().padStart(64, '0')
+  const poolTypes   = ['factory-twocrypto', 'factory-stable-ng']
 
-  const poolTypes = ['factory-twocrypto', 'factory-stable-ng']
-  const [bnRes, ...poolFetches] = await Promise.all([
-    fetch(RPC, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_blockNumber', params: [] }),
-      signal: AbortSignal.timeout(4_000),
-    }).then(r => r.json()).catch(() => ({ result: '0x0' })),
-    ...poolTypes.map(t =>
-      fetch(`${BASE}/getPools/monad/${t}`, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
-        .then(r => r.ok ? r.json() : null).catch(() => null)
-    ),
-  ])
-  const currentBlockHex = bnRes?.result ?? '0x0'
-  const BLOCKS_24H  = 195_000
-  const currentBlock = Number(BigInt(currentBlockHex))
-  const fromBlock24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
+  // Fetch pool lists — each independently so one failure doesn't kill the other
+  const poolResults = await Promise.allSettled(
+    poolTypes.map(t =>
+      fetch(`${BASE}/getPools/monad/${t}`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null)
+    )
+  )
 
   const allPools: any[] = []
-  for (const data of poolFetches) allPools.push(...(data?.data?.poolData ?? []))
+  for (const r of poolResults) {
+    if (r.status === 'fulfilled' && r.value?.data?.poolData) {
+      allPools.push(...r.value.data.poolData)
+    }
+  }
   if (allPools.length === 0) return []
 
-  const TE_CLASSIC = '0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140'
-  const TE_NG      = '0x143f1f8e861fbdeddd5b46e844b7d3ac7b86a122f36e8c463859ee6811b1f29c'
-
-  const balanceCalls = allPools.map((pool, i) => ({
-    jsonrpc: '2.0', id: i, method: 'eth_call',
-    params: [{ to: pool.lpTokenAddress ?? pool.address, data: '0x70a08231' + paddedAddr }, 'latest'],
-  }))
-  const feeCalls = allPools.map((pool, i) => ({
-    jsonrpc: '2.0', id: i + 1000, method: 'eth_call',
-    params: [{ to: pool.address, data: '0xddca3f43' }, 'latest'],
-  }))
-
-  // Each RPC call isolated — failures in fees/logs must NOT kill the balance lookup
-  let rpcRes: any[] = []
-  let feeRes: any[] = []
-  let logs:   any[] = []
-
-  try { rpcRes = await rpcBatch(balanceCalls, 12_000) }
-  catch { /* balance fetch failed — return empty */ }
-
-  if (rpcRes.length === 0) return []
-
-  try { feeRes = await rpcBatch(feeCalls, 8_000) }
-  catch { /* fee fetch failed — APR will be 0, positions still show */ }
-
-  try {
-    const logsRes = await rpcBatch([{
-      jsonrpc: '2.0', id: 9999, method: 'eth_getLogs',
-      params: [{ fromBlock: fromBlock24h, toBlock: 'latest', address: allPools.map(p => p.address), topics: [[TE_CLASSIC, TE_NG]] }],
-    }], 15_000)
-    logs = logsRes.find((r: any) => r.id === 9999)?.result ?? []
-  } catch { /* logs unavailable — APR will show 0 but positions still display */ }
-  const volumeByPool: Record<string, number> = {}
-  for (const log of logs) {
-    const poolAddr = log.address?.toLowerCase()
-    const pool = allPools.find(p => p.address.toLowerCase() === poolAddr)
-    if (!pool) continue
+  // balanceOf(user) for each pool LP token — sequential batches to avoid timeout
+  const CHUNK = 15
+  const rpcResults: any[] = []
+  for (let start = 0; start < allPools.length; start += CHUNK) {
+    const chunk = allPools.slice(start, start + CHUNK)
+    const calls = chunk.map((pool, j) => ({
+      jsonrpc: '2.0', id: start + j, method: 'eth_call',
+      params: [{ to: pool.lpTokenAddress ?? pool.address, data: '0x70a08231' + paddedAddr }, 'latest'],
+    }))
     try {
-      const d = log.data?.slice(2) ?? ''
-      if (d.length < 128) continue
-      const soldId     = Number(BigInt('0x' + d.slice(0, 64)))
-      const tokensSold = BigInt('0x' + d.slice(64, 128))
-      const decimals   = Number(pool.coins?.[soldId]?.decimals ?? 18)
-      volumeByPool[poolAddr] = (volumeByPool[poolAddr] ?? 0) + Number(tokensSold) / Math.pow(10, decimals)
-    } catch { /* skip */ }
+      const res = await rpcBatch(calls, 12_000)
+      rpcResults.push(...res)
+    } catch (e: any) {
+      console.error('[Curve] rpcBatch chunk error:', e?.message ?? e)
+    }
   }
 
-  const curveAprByPool: Record<string, number> = {}
-  allPools.forEach((pool, i) => {
-    const tvl = Number(pool.usdTotalExcludingBasePool ?? pool.usdTotal ?? 0)
-    if (tvl <= 0) return
-    const feeRaw  = decodeUint(feeRes.find((r: any) => r.id === i + 1000)?.result ?? '0x')
-    const feeRate = Number(feeRaw) / 1e10
-    const vol24h  = volumeByPool[pool.address?.toLowerCase()] ?? 0
-    if (vol24h > 0 && feeRate > 0)
-      curveAprByPool[pool.address?.toLowerCase()] = (vol24h * feeRate * 365 / tvl) * 100
-  })
-
   const positions: any[] = []
+
   for (let i = 0; i < allPools.length; i++) {
-    const result = rpcRes.find((r: any) => r.id === i)?.result ?? '0x'
-    if (!result || result === '0x' || result === '0x' + '0'.repeat(64)) continue
-    const balanceRaw = BigInt(result)
+    // Coerce id to number to handle string/number mismatch from rpcBatch
+    const r   = rpcResults.find((x: any) => Number(x.id) === i)
+    const raw = r?.result ?? '0x'
+
+    // Skip zero / empty balances
+    if (!raw || raw === '0x' || raw === '0x' + '0'.repeat(64)) continue
+    let balanceRaw: bigint
+    try { balanceRaw = BigInt(raw) } catch { continue }
     if (balanceRaw === 0n) continue
-    const pool           = allPools[i]
-    const totalSupplyRaw = BigInt(pool.totalSupply ?? '0')
-    const lpPrice        = Number(pool.lpTokenPrice ?? 0)
+
+    const pool             = allPools[i]
+    const totalSupplyRaw   = (() => { try { return BigInt(pool.totalSupply ?? '0') } catch { return 0n } })()
+    const lpPrice          = Number(pool.lpTokenPrice ?? 0)
     const userBalanceFloat = Number(balanceRaw) / 1e18
+
     const netValueUSD = lpPrice > 0
       ? userBalanceFloat * lpPrice
       : totalSupplyRaw > 0n
         ? (Number(balanceRaw) / Number(totalSupplyRaw)) * Number(pool.usdTotalExcludingBasePool ?? pool.usdTotal ?? 0)
         : 0
+
     if (netValueUSD < 0.01) continue
-    const coins  = pool.coins?.map((c: any) => c.symbol) ?? []
+
+    const coins = pool.coins?.map((c: any) => c.symbol) ?? []
     const poolId = pool.id ?? pool.address
+
     positions.push({
       protocol: 'Curve', type: 'liquidity', logo: '🌊',
       url: `https://curve.finance/dex/monad/pools/${poolId}/deposit`, chain: 'Monad',
-      label: pool.name ?? coins.join('/'), tokens: coins,
-      amountUSD: netValueUSD, apy: curveAprByPool[pool.address?.toLowerCase()] ?? 0,
-      netValueUSD, inRange: null,
+      label:     pool.name ?? coins.join('/'),
+      tokens:    coins,
+      amountUSD: netValueUSD,
+      apy:       0,       // APR skipped — eth_getLogs too heavy for edge runtime
+      netValueUSD,
+      inRange:   null,
     })
   }
+
   return positions
 }
 
