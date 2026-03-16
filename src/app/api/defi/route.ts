@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { MONAD_RPC as RPC, rpcBatch, getMonPrice } from '@/lib/monad'
 import { getAllPrices } from '@/lib/priceCache'
-import { getAprEntries, ensureWarm } from '@/lib/aprCache'
+import { getAprEntries } from '@/lib/aprCache'
 
 export const revalidate = 0
 function ethCall(to: string, data: string, id: number) {
@@ -938,12 +938,61 @@ async function fetchEulerV2(user: string): Promise<any[]> {
 
 type AprLookup = Map<string, number>
 
+const MERKL_BASE = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=100'
+const MERKL_TTL  = 3 * 60 * 1000
+
+let merklAprCache: { map: AprLookup; ts: number } | null = null
+
+const MERKL_PROTO_MAP: Record<string, string> = {
+  curve: 'Curve', uniswap: 'Uniswap V3', pancakeswap: 'PancakeSwap V3',
+  morpho: 'Morpho', kintsu: 'Kintsu', magma: 'Magma', shmonad: 'shMonad',
+  lagoon: 'Lagoon', kuru: 'Kuru', gearbox: 'GearBox V3', curvance: 'Curvance',
+  neverland: 'Neverland', euler: 'Euler V2', upshift: 'Upshift',
+}
+
+async function fetchMerklAprs(): Promise<AprLookup> {
+  if (merklAprCache && Date.now() - merklAprCache.ts < MERKL_TTL) return merklAprCache.map
+  try {
+    const pages = await Promise.all([1, 2, 3].map(page =>
+      fetch(`${MERKL_BASE}&page=${page}`, {
+        signal: AbortSignal.timeout(12_000), cache: 'no-store',
+        headers: { 'Accept': 'application/json' },
+      }).then(r => r.ok ? r.json() : null).catch(() => null)
+    ))
+    const raw: any[] = pages.flatMap(r => {
+      if (!r) return []
+      return Array.isArray(r) ? r : (r?.data ?? r?.opportunities ?? [])
+    })
+    if (!raw.length) return new Map()
+
+    const entries = raw.flatMap((opp: any) => {
+      const rawProto = ((opp.mainProtocol ?? opp.protocol) ?? '').toLowerCase()
+      const proto    = MERKL_PROTO_MAP[rawProto] ?? ''
+      if (!proto) return []
+      const apr = Number(opp.apr ?? 0)
+      if (apr <= 0) return []
+      const tokens: string[] = (opp.tokens ?? [])
+        .filter((t: any) => t.type === 'TOKEN' && !String(t.symbol ?? '').endsWith('-gauge'))
+        .map((t: any) => String(t.symbol ?? ''))
+        .filter(Boolean)
+      const label = String(opp.name ?? opp.identifier ?? tokens.join('/') ?? '')
+      return [{ protocol: proto, tokens, label, apr }]
+    })
+
+    const map = entriesToLookup(entries)
+    merklAprCache = { map, ts: Date.now() }
+    return map
+  } catch { return new Map() }
+}
+
 async function buildAprLookup(): Promise<AprLookup> {
-  // Ensure best-aprs data is in the shared aprCache (warms on cold start).
-  // On warm cache this returns instantly at zero cost.
-  await ensureWarm()
-  const entries = getAprEntries()
-  return entries ? entriesToLookup(entries) : new Map()
+  // Fast path: aprCache warm (best-aprs was called first) — zero latency
+  const cached = getAprEntries()
+  if (cached) return entriesToLookup(cached)
+
+  // Cold path: fetch Merkl directly for the most common protocols.
+  // aprCache will warm up once the user visits the Best APRs page.
+  return fetchMerklAprs()
 }
 
 function lookupApr(map: AprLookup, pos: any): number {
