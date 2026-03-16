@@ -890,7 +890,7 @@ async function fetchEulerV2(user: string): Promise<any[]> {
 
 type AprLookup = Map<string, number>
 
-const MERKL_API = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=300'
+const MERKL_BASE = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=100'
 
 // Module-level Merkl cache — avoid re-fetching within same Worker lifetime
 let merklAprCache: { map: AprLookup; ts: number } | null = null
@@ -926,13 +926,17 @@ async function fetchMerklAprs(): Promise<AprLookup> {
     return merklAprCache.map
   }
   try {
-    const res = await fetch(MERKL_API, {
-      signal: AbortSignal.timeout(12_000), cache: 'no-store',
-      headers: { 'Accept': 'application/json' },
+    // Merkl limits to 100 items/page — fetch pages 1-3 (300 entries covers all Monad protocols)
+    const pages = await Promise.all([1, 2, 3].map(page =>
+      fetch(`${MERKL_BASE}&page=${page}`, {
+        signal: AbortSignal.timeout(12_000), cache: 'no-store',
+        headers: { 'Accept': 'application/json' },
+      }).then(r => r.ok ? r.json() : null).catch(() => null)
+    ))
+    const data: any[] = pages.flatMap(raw => {
+      if (!raw) return []
+      return Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
     })
-    if (!res.ok) return new Map()
-    const raw = await res.json()
-    const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
     if (!data.length) return new Map()
 
     const PROTO_MAP: Record<string, string> = {
