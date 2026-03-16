@@ -238,12 +238,17 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isConnected || !address) {
       // During navigation wagmi briefly loses connection (~100-300ms).
-      // Only reset if there is no cached data AND we are not mid-fetch.
-      // This prevents the DeFi positions from disappearing on page navigation.
+      // If we have cached data, immediately restore it so UI never goes blank.
+      // Only reset to ZERO if there is truly no data and no fetch in progress.
       const addrToCheck = address ?? lastAddr.current
-      const hasCached   = addrToCheck && portfolioCache.has(addrToCheck.toLowerCase())
+      const cached      = addrToCheck ? portfolioCache.get(addrToCheck.toLowerCase()) : null
       const isMidFetch  = loadingAddr.current !== null
-      if (!hasCached && !isMidFetch) {
+
+      if (cached) {
+        // Restore from cache immediately — user will see stale data during reconnect
+        setTotals(cached.totals)
+        setStatus('done')
+      } else if (!isMidFetch) {
         setTotals(ZERO)
         setStatus('idle')
         setLastUpdated(null)
