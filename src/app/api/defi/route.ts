@@ -1007,7 +1007,6 @@ export async function GET(req: NextRequest) {
         safeFetch('EulerV2',       () => fetchEulerV2(address)),
       ])
     ])
-  ])
 
   function unwrap(r: PromiseSettledResult<any[]>): any[] {
     return r.status === 'fulfilled' ? r.value : []
