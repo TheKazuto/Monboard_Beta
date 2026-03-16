@@ -162,6 +162,11 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       setTotals(entry.totals)
       setStatus('done')
       setLastUpdated(new Date(entry.fetchedAt))
+      // Mark defi as loaded for this address so the DeFi page doesn't
+      // show loading state when restoring from cache on navigation
+      if (entry.totals.defiPositions.length > 0) {
+        defiLoadedRef.current = key
+      }
       return
     }
 
@@ -279,6 +284,9 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
           // Restore cached state immediately so UI never goes blank
           setTotals(cached.totals)
           setStatus('done')
+          if (cached.totals.defiPositions.length > 0) {
+            defiLoadedRef.current = knownAddr
+          }
           return
         }
         // Has an address but no cache yet and already loading — just wait
