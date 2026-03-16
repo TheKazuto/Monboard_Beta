@@ -495,16 +495,21 @@ async function fetchCurve(user: string): Promise<any[]> {
     params: [{ to: pool.address, data: '0xddca3f43' }, 'latest'],
   }))
 
-  const [rpcRes, feeRes, logsRes] = await Promise.all([
+  // eth_getLogs isolated — a timeout here must NOT kill the balance lookup
+  const [rpcRes, feeRes] = await Promise.all([
     rpcBatch(balanceCalls, 10_000),
     rpcBatch(feeCalls, 8_000),
-    rpcBatch([{
-      jsonrpc: '2.0', id: 9999, method: 'eth_getLogs',
-      params: [{ fromBlock: fromBlock24h, toBlock: 'latest', address: allPools.map(p => p.address), topics: [[TE_CLASSIC, TE_NG]] }],
-    }], 15_000),
   ])
 
-  const logs: any[] = logsRes.find((r: any) => r.id === 9999)?.result ?? []
+  // Fetch logs separately with a generous timeout; silently ignore failures
+  let logs: any[] = []
+  try {
+    const logsRes = await rpcBatch([{
+      jsonrpc: '2.0', id: 9999, method: 'eth_getLogs',
+      params: [{ fromBlock: fromBlock24h, toBlock: 'latest', address: allPools.map(p => p.address), topics: [[TE_CLASSIC, TE_NG]] }],
+    }], 15_000)
+    logs = logsRes.find((r: any) => r.id === 9999)?.result ?? []
+  } catch { /* logs unavailable — APR will show 0 but positions still display */ }
   const volumeByPool: Record<string, number> = {}
   for (const log of logs) {
     const poolAddr = log.address?.toLowerCase()
