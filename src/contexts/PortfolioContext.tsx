@@ -236,18 +236,9 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
 
     const fetchDefi = async () => {
       try {
-        // Use cachedFetch for fast navigation restore.
-        // If cachedFetch returns empty positions but we already have positions
-        // in defiRef (from portfolio cache seed), force a fresh fetch once.
-        let data = await cachedFetch<any>('/api/defi', addr)
-        const freshPositions = Array.isArray(data.positions) ? data.positions : []
-
-        // If cached result has no positions but we already have them, re-fetch fresh
-        const existingPositions = defiRef.current.defiPositions ?? []
-        if (freshPositions.length === 0 && existingPositions.length > 0) {
-          data = await cachedFetch<any>('/api/defi', addr, true)  // force=true bypasses cache
-        }
-
+        // Use cachedFetch — fast on navigation (serves dataCache).
+        // safePositions guard in flush() prevents empty overwrites.
+        const data = await cachedFetch<any>('/api/defi', addr)
         if (loadingAddr.current !== key) return
         const s    = data.summary ?? {}
         defiRef.current = {
