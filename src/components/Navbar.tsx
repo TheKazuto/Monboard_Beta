@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { LayoutDashboard, Wallet, BarChart3, History, User, Menu, X, ArrowLeftRight, Shield, TrendingUp, Banknote } from 'lucide-react'
+import { LayoutDashboard, Wallet, BarChart3, History, User, Menu, X, ArrowLeftRight, Shield, TrendingUp } from 'lucide-react'
 import { ConnectButton } from '@rainbow-me/rainbowkit'
 
 // Stable style object for the logo wordmark
@@ -15,7 +15,6 @@ const navLinks = [
   { href: '/defi',         label: 'DeFi Positions', icon: BarChart3 },
   { href: '/best-aprs',    label: 'Best APRs',      icon: TrendingUp },
   { href: '/swap',         label: 'Swap/Bridge',    icon: ArrowLeftRight },
-  { href: '/onramp',       label: 'Fiat/Crypto',    icon: Banknote },
   { href: '/security',     label: 'Security',       icon: Shield },
   { href: '/transactions', label: 'Transactions',   icon: History },
   { href: '/account',      label: 'Account',        icon: User },
