@@ -826,8 +826,14 @@ async function fetchLagoon(user: string): Promise<any[]> {
 // Vault list is fetched dynamically from the Kuru API (api.kuru.io/api/v2/vaults)
 // so new vaults are detected automatically without code changes.
 
-const KURU_API = 'https://api.kuru.io/api/v2/vaults'
+const KURU_API = 'https://api.kuru.io/api/v3/vaults'
 const KURU_NAV_SEL = '0xe04d89da'  // getVaultValue() — returns NAV in quote token
+const KURU_HEADERS = {
+  'Accept': 'application/json',
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Origin': 'https://www.kuru.io',
+  'Referer': 'https://www.kuru.io/',
+}
 
 // Known vaults not yet indexed by the Kuru API
 // Add new ones here if they appear in user deposits before the API includes them
@@ -845,16 +851,18 @@ async function fetchKuru(user: string): Promise<any[]> {
     try {
       const apiRes = await fetch(KURU_API, {
         signal: AbortSignal.timeout(8_000), cache: 'no-store',
-        headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+        headers: KURU_HEADERS,
       })
       if (apiRes.ok) {
         const apiData = await apiRes.json()
-        apiMetas = (apiData?.data?.data ?? []).map((v: any) => ({
-          address:  (v.vaultaddress ?? '').toLowerCase(),
-          name:     `Kuru ${v.basetoken?.ticker ?? '?'}/${v.quotetoken?.ticker ?? '?'}`,
-          base:     v.basetoken?.ticker  ?? '?',
-          quote:    v.quotetoken?.ticker ?? '?',
-          quoteDec: Number(v.quotetoken?.decimal ?? 6),
+        // v3 API shape: { data: [...] } — field names use camelCase
+        const vaultList = apiData?.data ?? apiData?.data?.data ?? []
+        apiMetas = (Array.isArray(vaultList) ? vaultList : []).map((v: any) => ({
+          address:  (v.vaultAddress ?? v.vaultaddress ?? '').toLowerCase(),
+          name:     `Kuru ${v.baseToken?.ticker ?? v.basetoken?.ticker ?? '?'}/${v.quoteToken?.ticker ?? v.quotetoken?.ticker ?? '?'}`,
+          base:     v.baseToken?.ticker  ?? v.basetoken?.ticker  ?? '?',
+          quote:    v.quoteToken?.ticker ?? v.quotetoken?.ticker ?? '?',
+          quoteDec: Number(v.quoteToken?.decimal ?? v.quotetoken?.decimal ?? 6),
         })).filter((m: VaultMeta) => m.address)
       }
     } catch { /* API unavailable — use legacy list only */ }
