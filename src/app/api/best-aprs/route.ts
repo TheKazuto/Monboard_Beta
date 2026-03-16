@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 // Fix #4: MONAD_RPC imported from shared lib — removes local duplicate declaration
 // Fix #7: getMonPrice imported as getSharedMonPrice — removes local fetchMonPrice function
 import { rpcBatch, MONAD_RPC, getMonPrice as getSharedMonPrice } from '@/lib/monad'
+import { setAprCache } from '@/lib/aprCache'
 
 export const revalidate = 0
 
@@ -1119,6 +1120,9 @@ async function fetchAllData() {
   const pools  = all.filter(e => e.type === 'pool').sort(byApr).slice(0, 10)
   const vaults = all.filter(e => e.type === 'vault').sort(byApr).slice(0, 10)
   const lends  = all.filter(e => e.type === 'lend').sort(byApr).slice(0, 10)
+
+  // Populate shared aprCache so defi/route.ts can inject APRs without HTTP self-calls
+  setAprCache(all.map(e => ({ protocol: e.protocol, tokens: e.tokens, label: e.label, apr: e.apr })))
 
   return {
     stableAPRs,
