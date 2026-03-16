@@ -1,106 +1,88 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { rpcBatch } from '@/lib/monad'
 
 // ─── Debug route — REMOVER antes do deploy final ─────────────────────────────
-// Testa o buildAprLookup e mostra o que o Merkl retorna
-// GET /api/debug-apr?protocol=Curve&tokens=WMON,shMON,sMON,gMON
+// GET /api/debug-gearbox?address=0x...
 
-const MERKL_BASE = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=100'
+const GEARBOX_URL = 'https://state-cache.gearbox.foundation/Monad.json'
 
-const PROTO_MAP: Record<string, string> = {
-  curve: 'Curve', uniswap: 'Uniswap V3', pancakeswap: 'PancakeSwap V3',
-  morpho: 'Morpho', kintsu: 'Kintsu', magma: 'Magma', shmonad: 'shMonad',
-  lagoon: 'Lagoon', kuru: 'Kuru', gearbox: 'GearBox V3', curvance: 'Curvance',
-  neverland: 'Neverland', euler: 'Euler V2', upshift: 'Upshift',
+function balanceOfData(addr: string) {
+  return '0x70a08231' + addr.slice(2).toLowerCase().padStart(64, '0')
+}
+function decodeUint(hex: string): bigint {
+  if (!hex || hex === '0x') return 0n
+  try { return BigInt(hex.startsWith('0x') ? hex : '0x' + hex) } catch { return 0n }
 }
 
 export async function GET(req: NextRequest) {
-  const filterProto  = req.nextUrl.searchParams.get('protocol') ?? ''
-  const filterTokens = req.nextUrl.searchParams.get('tokens')?.split(',') ?? []
+  const address = req.nextUrl.searchParams.get('address')
+  if (!address) return NextResponse.json({ error: 'Pass ?address=0x...' }, { status: 400 })
 
   const trace: Record<string, any> = {}
 
-  // 1. Fetch Merkl
-  let rawData: any[] = []
+  // 1. Fetch Gearbox API
+  let data: any = null
   try {
-    const pages = await Promise.all([1, 2, 3].map(page =>
-      fetch(`${MERKL_BASE}&page=${page}`, {
-        signal: AbortSignal.timeout(10_000), cache: 'no-store',
-        headers: { 'Accept': 'application/json' },
-      }).then(async r => {
-        trace[`page${page}_status`] = r.status
-        if (!r.ok) { trace[`page${page}_body`] = await r.text().catch(() => ''); return null }
-        return r.json()
-      }).catch(e => { trace[`page${page}_error`] = e?.message; return null })
-    ))
-    rawData = pages.flatMap(raw => {
-      if (!raw) return []
-      return Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
-    })
-    trace.merkl_total_entries = rawData.length
+    const res = await fetch(GEARBOX_URL, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
+    trace.api_status = res.status
+    trace.api_ok     = res.ok
+    if (!res.ok) return NextResponse.json(trace)
+    data = await res.json()
   } catch (e: any) {
-    trace.merkl_error = e?.message ?? String(e)
+    trace.api_error = e?.message
     return NextResponse.json(trace)
   }
 
-  if (!Array.isArray(rawData)) {
-    trace.error = 'Merkl response is not array'
-    trace.raw_sample = rawData
-    return NextResponse.json(trace)
+  const markets: any[] = data?.markets ?? []
+  trace.market_count = markets.length
+
+  // 2. Show raw structure of first market
+  if (markets[0]) {
+    const p = markets[0]?.pool
+    trace.first_market_pool_keys = p ? Object.keys(p) : null
+    trace.first_pool_baseParams  = p?.baseParams
+    trace.first_pool_decimals    = p?.decimals
+    trace.first_pool_name        = p?.name
+    trace.first_pool_isPaused    = p?.isPaused
+    trace.first_pool_supplyRate  = p?.supplyRate
+    trace.first_pool_expectedLiq = p?.expectedLiquidity
+    trace.first_pool_totalSupply = p?.totalSupply
   }
 
-  // 2. Show all unique protocols in response
-  const protocolsInResponse = [...new Set(rawData.map((o: any) =>
-    (o.mainProtocol ?? o.protocol ?? 'UNKNOWN').toLowerCase()
-  ))].sort()
-  trace.protocols_in_response = protocolsInResponse
-
-  // 3. Parse entries (same logic as defi_route.ts)
-  const entries = rawData.flatMap((opp: any) => {
-    const rawProto = ((opp.mainProtocol ?? opp.protocol) ?? '').toLowerCase()
-    const proto    = PROTO_MAP[rawProto] ?? ''
-    if (!proto) return []
-    const apr = Number(opp.apr ?? 0)
-    if (apr <= 0) return []
-    const tokens: string[] = (opp.tokens ?? [])
-      .filter((t: any) => t.type === 'TOKEN' && !String(t.symbol ?? '').endsWith('-gauge'))
-      .map((t: any) => String(t.symbol ?? ''))
-      .filter(Boolean)
-    const label = String(opp.name ?? opp.identifier ?? tokens.join('/') ?? '')
-    return [{ protocol: proto, tokens, label, apr, rawProto, identifier: opp.identifier }]
-  })
-
-  trace.parsed_entries_count = entries.length
-  trace.parsed_entries_by_protocol = Object.entries(
-    entries.reduce((acc: any, e: any) => {
-      acc[e.protocol] = (acc[e.protocol] ?? 0) + 1
-      return acc
-    }, {})
-  )
-
-  // 4. Show entries matching the filter
-  const proto  = filterProto || 'Curve'
-  const matching = entries.filter(e => e.protocol === proto)
-  trace[`entries_for_${proto}`] = matching.map(e => ({
-    protocol: e.protocol,
-    tokens:   e.tokens,
-    label:    e.label,
-    apr:      e.apr,
-    identifier: e.identifier,
+  // 3. List all pool addresses
+  trace.all_pools = markets.map((m: any) => ({
+    name:    m?.pool?.name,
+    addr:    m?.pool?.baseParams?.addr,
+    paused:  m?.pool?.isPaused,
+    decimals: m?.pool?.decimals,
+    supplyRate: m?.pool?.supplyRate,
+    expectedLiq_raw: m?.pool?.expectedLiquidity,
+    totalSupply_raw: m?.pool?.totalSupply,
   }))
 
-  // 5. Test the exact lookup that defi_route uses
-  if (filterTokens.length > 0) {
-    const lookupKey = proto + ':' + filterTokens.slice().sort().join('+')
-    trace.lookup_key = lookupKey
-    const match = matching.find(e =>
-      (proto + ':' + e.tokens.slice().sort().join('+')) === lookupKey
-    )
-    trace.lookup_match = match ?? null
-  }
+  // 4. Check balanceOf for each pool address
+  const activePools = markets
+    .map((m: any) => m?.pool)
+    .filter((p: any) => p?.baseParams?.addr)
 
-  // 6. Show sample of unrecognised protocols (to expand PROTO_MAP if needed)
-  const unrecognised = protocolsInResponse.filter(p => !PROTO_MAP[p])
-  trace.unrecognised_protocols = unrecognised
+  if (activePools.length > 0) {
+    const calls = activePools.map((p: any, i: number) => ({
+      jsonrpc: '2.0', id: i, method: 'eth_call',
+      params: [{ to: p.baseParams.addr, data: balanceOfData(address) }, 'latest'],
+    }))
+    const results = await rpcBatch(calls).catch(() => [])
+    trace.balance_results = activePools.map((p: any, i: number) => {
+      const r      = results.find((x: any) => Number(x.id) === i)
+      const shares = decodeUint(r?.result ?? '0x')
+      return {
+        name:    p.name,
+        addr:    p.baseParams.addr,
+        raw:     r?.result,
+        shares:  shares.toString(),
+        hasBalance: shares > 0n,
+      }
+    })
+  }
 
   return NextResponse.json(trace)
 }
