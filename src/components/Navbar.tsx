@@ -10,7 +10,7 @@ import { ConnectButton } from '@rainbow-me/rainbowkit'
 const LOGO_STYLE = { fontFamily: 'Plus Jakarta Sans, sans-serif', fontWeight: 700, color: 'var(--text-primary)', fontSize: '1.125rem' } as const
 
 const navLinks = [
-  { href: '/',             label: 'Dashboard',      icon: LayoutDashboard },
+  { href: '/dashboard',    label: 'Dashboard',      icon: LayoutDashboard },
   { href: '/portfolio',    label: 'Portfolio',      icon: Wallet },
   { href: '/defi',         label: 'DeFi Positions', icon: BarChart3 },
   { href: '/best-aprs',    label: 'Best APRs',      icon: TrendingUp },

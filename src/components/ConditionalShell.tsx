@@ -5,7 +5,7 @@ import Navbar from '@/components/Navbar'
 import BottomBar from '@/components/BottomBar'
 
 // Routes that should not display the Navbar or BottomBar
-const BARE_ROUTES = ['/landing']
+const BARE_ROUTES = ['/']
 
 export default function ConditionalShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()

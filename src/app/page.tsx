@@ -1,356 +1,532 @@
 'use client'
 
-import TopTokens from '@/components/TopTokens'
-import TopEarners from '@/components/TopEarners'
-import RecentActivity from '@/components/RecentActivity'
-import FearAndGreed from '@/components/FearAndGreed'
-import TokenExposure from '@/components/TokenExposure'
-import PortfolioHistory from '@/components/PortfolioHistory'
-import AdBanner from '@/components/AdBanner'
-import { usePortfolio } from '@/contexts/PortfolioContext'
-import { useWallet }    from '@/contexts/WalletContext'
-import { usePreferences } from '@/contexts/PreferencesContext'
-import { SORA } from '@/lib/styles'
-import {
-  RefreshCw, Wallet, Image,
-  Zap, ChevronRight, Bell,
-} from 'lucide-react'
+import Link from 'next/link'
+import { useEffect, useRef, useState } from 'react'
 
-// ─── Wallet Summary hero ──────────────────────────────────────────────────────
-function WalletSummary() {
-  const { totals, status, lastUpdated, refresh } = usePortfolio()
-  const { isConnected } = useWallet()
-  const { fmtValue } = usePreferences()
+// ─── Animated counter ─────────────────────────────────────────────────────────
+function Counter({ to, suffix = '' }: { to: number; suffix?: string }) {
+  const [val, setVal] = useState(0)
+  const ref = useRef<HTMLSpanElement>(null)
 
-  const isLoading = status === 'loading'
-  const isPartial = status === 'partial'
-  const hasData   = isConnected && (status === 'partial' || status === 'done')
+  useEffect(() => {
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting) return
+      observer.disconnect()
+      let start = 0
+      const step = Math.ceil(to / 60)
+      const timer = setInterval(() => {
+        start += step
+        if (start >= to) { setVal(to); clearInterval(timer) }
+        else setVal(start)
+      }, 16)
+    }, { threshold: 0.5 })
+    if (ref.current) observer.observe(ref.current)
+    return () => observer.disconnect()
+  }, [to])
 
-  // Skeleton shimmer for a number slot
-  const Shimmer = ({ w = 'w-28' }: { w?: string }) => (
-    <div className={`${w} h-5 rounded-md bg-white/20 animate-pulse`} />
-  )
+  return <span ref={ref}>{val}{suffix}</span>
+}
 
+// ─── Features ─────────────────────────────────────────────────────────────────
+const FEATURES = [
+  {
+    icon: '💼',
+    title: 'Portfolio Overview',
+    desc: 'Total wallet value in USD combining tokens, NFTs and DeFi positions. 24h change at a glance.',
+    tag: 'Live',
+  },
+  {
+    icon: '📊',
+    title: 'DeFi Positions',
+    desc: 'All your active positions across 14+ Monad protocols — liquidity pools, lending, staking — in one view.',
+    tag: '14+ protocols',
+  },
+  {
+    icon: '🔥',
+    title: 'Best APRs',
+    desc: 'Real-time yield opportunities aggregated from every major Monad protocol. No hardcoded values.',
+    tag: 'Real-time',
+  },
+  {
+    icon: '🔁',
+    title: 'Swap & Bridge',
+    desc: 'Cross-chain swaps across 70+ networks, best rate from 360+ DEXes and bridges via Rubic.',
+    tag: 'Cross-chain',
+  },
+  {
+    icon: '🛡️',
+    title: 'Security Scanner',
+    desc: 'Token approval scanner with one-click revoke. Know exactly which contracts have access to your funds.',
+    tag: 'On-chain',
+  },
+  {
+    icon: '📜',
+    title: 'Transaction History',
+    desc: 'Full on-chain history with smart classification: sends, swaps, DeFi, NFT mints and more.',
+    tag: 'Full history',
+  },
+]
+
+// ─── Protocol logos ───────────────────────────────────────────────────────────
+const PROTOCOLS = [
+  'Morpho', 'Euler V2', 'Neverland', 'Uniswap V3',
+  'PancakeSwap', 'Curve', 'GearBox', 'Lagoon',
+  'Upshift', 'Kintsu', 'Magma', 'shMonad',
+  'Curvance', 'Midas', 'Kuru',
+]
+
+// ─── Stats ─────────────────────────────────────────────────────────────────────
+const STATS = [
+  { label: 'Protocols integrated', value: 14, suffix: '+' },
+  { label: 'Features available',   value: 10, suffix: '+' },
+  { label: 'Networks supported',   value: 70, suffix: '+' },
+  { label: 'Cost to use',          value: 0,  suffix: '' },
+]
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+export default function LandingPage() {
   return (
-    <div className="card p-6 relative overflow-hidden"
-      style={{ background: 'linear-gradient(135deg, #836EF9 0%, #6d28d9 100%)' }}>
+    <>
+      {/* ── Global styles + keyframes ── */}
+      <style dangerouslySetInnerHTML={{ __html: `
+        @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,400;12..96,500;12..96,600;12..96,700;12..96,800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500&display=swap');
 
-      {/* Decorative blobs */}
-      <div className="absolute top-0 right-0 w-64 h-64 rounded-full opacity-10"
-        style={{ background: 'radial-gradient(circle, white, transparent)', transform: 'translate(30%, -40%)' }} />
-      <div className="absolute bottom-0 left-20 w-40 h-40 rounded-full opacity-10"
-        style={{ background: 'radial-gradient(circle, white, transparent)', transform: 'translate(0, 40%)' }} />
+        :root {
+          --land-bg:     #08080f;
+          --land-card:   rgba(255,255,255,0.04);
+          --land-border: rgba(255,255,255,0.08);
+          --land-violet: #836EF9;
+          --land-violet2: #6d28d9;
+          --land-text:   #e8e5ff;
+          --land-muted:  rgba(232,229,255,0.45);
+        }
 
-      <div className="relative z-10">
-        <div className="flex items-start justify-between mb-4">
-          <div>
-            <p className="text-violet-200 text-sm font-medium mb-1">Total Portfolio Value</p>
+        .land * { box-sizing: border-box; }
+        .land { font-family: 'DM Sans', sans-serif; background: var(--land-bg); color: var(--land-text); min-height: 100vh; overflow-x: hidden; }
 
-            {/* Main value */}
-            {!isConnected ? (
-              <h2 className="text-white font-display text-4xl font-bold" style={SORA}>
-                —
-              </h2>
-            ) : isLoading ? (
-              <div className="w-48 h-10 rounded-lg bg-white/20 animate-pulse mt-1" />
-            ) : (
-              <h2 className="text-white font-display text-4xl font-bold" style={SORA}>
-                {fmtValue(totals.totalValueUSD)}
-              </h2>
-            )}
+        /* Mesh bg */
+        .land-hero-bg {
+          position: absolute; inset: 0; overflow: hidden; pointer-events: none;
+        }
+        .land-hero-bg::before {
+          content: '';
+          position: absolute; inset: -50%;
+          background: radial-gradient(ellipse 80% 60% at 60% 30%, rgba(131,110,249,0.18) 0%, transparent 70%),
+                      radial-gradient(ellipse 60% 50% at 20% 70%, rgba(109,40,217,0.12) 0%, transparent 70%);
+          animation: meshPulse 8s ease-in-out infinite alternate;
+        }
+        .land-grid {
+          position: absolute; inset: 0;
+          background-image:
+            linear-gradient(rgba(131,110,249,0.06) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(131,110,249,0.06) 1px, transparent 1px);
+          background-size: 48px 48px;
+          mask-image: radial-gradient(ellipse 100% 80% at 50% 0%, black 0%, transparent 80%);
+        }
 
-            {/* Wallet connected label */}
-            {!isConnected && (
-              <p className="text-violet-300 text-sm mt-2">Connect your wallet to see your portfolio</p>
-            )}
+        /* Floating orbs */
+        .orb {
+          position: absolute; border-radius: 50%;
+          filter: blur(60px); opacity: 0.25;
+          animation: orbFloat 12s ease-in-out infinite;
+        }
+        .orb-1 { width: 400px; height: 400px; background: #836EF9; top: -100px; left: -80px; animation-delay: 0s; }
+        .orb-2 { width: 300px; height: 300px; background: #6d28d9; top: 200px; right: -60px; animation-delay: -4s; }
+        .orb-3 { width: 200px; height: 200px; background: #a78bfa; bottom: 0; left: 40%; animation-delay: -8s; }
 
-            {/* Last updated */}
-            {hasData && lastUpdated && (
-              <p className="text-violet-300 text-xs mt-2">
-                Updated {lastUpdated.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
-                {isPartial && <span className="ml-1 animate-pulse">· loading…</span>}
-              </p>
-            )}
-          </div>
+        @keyframes meshPulse { from { transform: scale(1) rotate(0deg); } to { transform: scale(1.08) rotate(3deg); } }
+        @keyframes orbFloat {
+          0%, 100% { transform: translateY(0) scale(1); }
+          50% { transform: translateY(-40px) scale(1.05); }
+        }
 
-          {/* Refresh button */}
-          <button
-            onClick={refresh}
-            disabled={!isConnected || isLoading}
-            className="p-2 rounded-lg bg-white/10 hover:bg-white/20 transition-colors text-white disabled:opacity-40 disabled:cursor-not-allowed"
-            title="Refresh portfolio"
-          >
-            <RefreshCw size={16} className={isLoading ? 'animate-spin' : ''} />
-          </button>
-        </div>
+        /* Reveal animations */
+        .reveal {
+          opacity: 0; transform: translateY(28px);
+          animation: revealUp 0.7s cubic-bezier(.16,1,.3,1) forwards;
+        }
+        @keyframes revealUp { to { opacity: 1; transform: translateY(0); } }
+        .d1 { animation-delay: 0.1s; }
+        .d2 { animation-delay: 0.22s; }
+        .d3 { animation-delay: 0.34s; }
+        .d4 { animation-delay: 0.46s; }
+        .d5 { animation-delay: 0.58s; }
 
-        {/* Three breakdown pills */}
-        <div className="flex gap-6 pt-4 border-t border-white/20">
+        /* Headline */
+        .land-h1 {
+          font-family: 'Bricolage Grotesque', sans-serif;
+          font-size: clamp(2.6rem, 7vw, 5.5rem);
+          font-weight: 800;
+          line-height: 1.05;
+          letter-spacing: -0.03em;
+        }
+        .land-h2 {
+          font-family: 'Bricolage Grotesque', sans-serif;
+          font-size: clamp(1.6rem, 3.5vw, 2.5rem);
+          font-weight: 700;
+          letter-spacing: -0.02em;
+        }
 
-          {/* Token Assets */}
-          <div>
-            <div className="flex items-center gap-1.5 text-violet-200 text-xs mb-1">
-              <Wallet size={12} />
-              Token Assets
-            </div>
-            {!isConnected ? (
-              <p className="text-white font-semibold text-lg">—</p>
-            ) : isLoading ? (
-              <Shimmer />
-            ) : (
-              <p className="text-white font-semibold text-lg">{fmtValue(totals.tokenValueUSD)}</p>
-            )}
-          </div>
+        /* Gradient text */
+        .grad-text {
+          background: linear-gradient(135deg, #a78bfa 0%, #836EF9 40%, #c4b5fd 100%);
+          -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+          background-clip: text;
+        }
 
-          {/* NFT Value */}
-          <div>
-            <div className="flex items-center gap-1.5 text-violet-200 text-xs mb-1">
-              <Image size={12} />
-              NFT Value
-            </div>
-            {!isConnected ? (
-              <p className="text-white font-semibold text-lg">—</p>
-            ) : isLoading ? (
-              <Shimmer />
-            ) : (
-              <p className="text-white font-semibold text-lg">{fmtValue(totals.nftValueUSD)}</p>
-            )}
-          </div>
+        /* Header */
+        .land-header {
+          position: fixed; top: 0; left: 0; right: 0; z-index: 50;
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 0 2rem; height: 64px;
+          background: rgba(8,8,15,0.8);
+          backdrop-filter: blur(16px);
+          border-bottom: 1px solid var(--land-border);
+        }
+        .land-logo {
+          display: flex; align-items: center; gap: 0.6rem;
+          font-family: 'Bricolage Grotesque', sans-serif;
+          font-weight: 700; font-size: 1.1rem; color: var(--land-text);
+          text-decoration: none;
+        }
+        .land-logo-dot {
+          width: 32px; height: 32px;
+          background: linear-gradient(135deg, #836EF9, #6d28d9);
+          border-radius: 8px;
+          display: flex; align-items: center; justify-content: center;
+          font-size: 0.8rem; font-weight: 800; color: white;
+          box-shadow: 0 4px 20px rgba(131,110,249,0.4);
+        }
+        .btn-launch {
+          display: inline-flex; align-items: center; gap: 0.4rem;
+          padding: 0.5rem 1.25rem;
+          background: linear-gradient(135deg, #836EF9, #6d28d9);
+          color: white; font-weight: 600; font-size: 0.875rem;
+          border-radius: 999px; text-decoration: none;
+          border: none; cursor: pointer;
+          box-shadow: 0 4px 20px rgba(131,110,249,0.35);
+          transition: transform 0.15s, box-shadow 0.15s;
+        }
+        .btn-launch:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 8px 30px rgba(131,110,249,0.5);
+        }
+        .btn-launch-outline {
+          display: inline-flex; align-items: center; gap: 0.4rem;
+          padding: 0.75rem 2rem;
+          background: transparent;
+          color: var(--land-text); font-weight: 500; font-size: 1rem;
+          border-radius: 999px; text-decoration: none;
+          border: 1px solid var(--land-border);
+          transition: border-color 0.15s, background 0.15s;
+        }
+        .btn-launch-outline:hover {
+          border-color: rgba(131,110,249,0.5);
+          background: rgba(131,110,249,0.08);
+        }
+        .btn-launch-lg {
+          padding: 0.875rem 2.5rem;
+          font-size: 1.05rem;
+        }
 
-          {/* DeFi Positions */}
-          <div>
-            <div className="flex items-center gap-1.5 text-violet-200 text-xs mb-1">
-              <Zap size={12} />
-              DeFi Positions
-            </div>
-            {!isConnected ? (
-              <p className="text-white font-semibold text-lg">—</p>
-            ) : isLoading ? (
-              <Shimmer />
-            ) : (
-              <p className="text-white font-semibold text-lg">{fmtValue(totals.defiNetValueUSD)}</p>
-            )}
-          </div>
+        /* Feature card */
+        .feat-card {
+          background: var(--land-card);
+          border: 1px solid var(--land-border);
+          border-radius: 16px;
+          padding: 1.5rem;
+          transition: border-color 0.2s, background 0.2s, transform 0.2s;
+          position: relative; overflow: hidden;
+        }
+        .feat-card::before {
+          content: '';
+          position: absolute; top: 0; left: 0; right: 0; height: 1px;
+          background: linear-gradient(90deg, transparent, rgba(131,110,249,0.4), transparent);
+          opacity: 0; transition: opacity 0.3s;
+        }
+        .feat-card:hover {
+          border-color: rgba(131,110,249,0.3);
+          background: rgba(131,110,249,0.06);
+          transform: translateY(-3px);
+        }
+        .feat-card:hover::before { opacity: 1; }
 
-        </div>
-      </div>
-    </div>
-  )
-}
+        /* Tag pill */
+        .tag {
+          display: inline-block;
+          padding: 0.15rem 0.6rem;
+          background: rgba(131,110,249,0.15);
+          color: #a78bfa;
+          font-size: 0.7rem; font-weight: 600;
+          border-radius: 999px;
+          letter-spacing: 0.04em; text-transform: uppercase;
+        }
 
-// ─── DeFi Positions helpers (outside component — stable references) ─────────
-function typeLabel(type: string): string {
-  if (type === 'lending')   return 'Lending'
-  if (type === 'vault')     return 'Vault'
-  if (type === 'liquidity') return 'Liquidity'
-  return type
-}
+        /* Protocol pill */
+        .proto-pill {
+          display: inline-flex; align-items: center;
+          padding: 0.4rem 0.9rem;
+          background: var(--land-card);
+          border: 1px solid var(--land-border);
+          border-radius: 999px;
+          font-size: 0.8rem; font-weight: 500; color: var(--land-muted);
+          transition: border-color 0.2s, color 0.2s;
+          white-space: nowrap;
+        }
+        .proto-pill:hover { border-color: rgba(131,110,249,0.4); color: var(--land-text); }
 
-function getApy(pos: any): number | null {
-  if (pos.apy != null && pos.apy > 0)  return pos.apy
-  if (pos.supply?.[0]?.apy != null)    return pos.supply[0].apy
-  return null
-}
+        /* Stats */
+        .stat-card {
+          text-align: center; padding: 1.5rem;
+          background: var(--land-card);
+          border: 1px solid var(--land-border);
+          border-radius: 16px;
+        }
+        .stat-num {
+          font-family: 'Bricolage Grotesque', sans-serif;
+          font-size: clamp(2rem, 5vw, 3rem);
+          font-weight: 800; line-height: 1;
+          background: linear-gradient(135deg, #a78bfa, #836EF9);
+          -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+          background-clip: text;
+        }
 
-// ─── DeFi Positions widget (dashboard mini preview — top 3) ──────────────────
-// Reads defiPositions directly from PortfolioContext — no extra API call needed.
-function DeFiPositions() {
-  const { totals, status, refresh } = usePortfolio()
-  const { isConnected }             = useWallet()
-  const { fmtValue }                = usePreferences()
+        /* Section */
+        .land-section { padding: 6rem 2rem; max-width: 1100px; margin: 0 auto; }
 
-  const loading = status === 'loading'
-  const all     = totals.defiPositions
-  const top3    = [...all]
-    .filter(p => (p.netValueUSD ?? 0) > 0)
-    .sort((a, b) => (b.netValueUSD ?? 0) - (a.netValueUSD ?? 0))
-    .slice(0, 3)
-  const total = all.reduce((s, p) => s + (p.netValueUSD ?? 0), 0)
+        /* Scrolling protocols ticker */
+        .ticker-wrap { overflow: hidden; position: relative; }
+        .ticker-wrap::before, .ticker-wrap::after {
+          content: ''; position: absolute; top: 0; bottom: 0; width: 80px; z-index: 2;
+        }
+        .ticker-wrap::before { left: 0; background: linear-gradient(90deg, var(--land-bg), transparent); }
+        .ticker-wrap::after  { right: 0; background: linear-gradient(-90deg, var(--land-bg), transparent); }
+        .ticker {
+          display: flex; gap: 0.75rem;
+          animation: ticker 30s linear infinite;
+          width: max-content;
+        }
+        .ticker:hover { animation-play-state: paused; }
+        @keyframes ticker { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
-  return (
-    <div className="card p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="font-semibold text-gray-800" style={SORA}>
-          DeFi Positions
-        </h3>
-        <div className="flex items-center gap-2">
-          {isConnected && (
-            <button
-              onClick={refresh}
-              disabled={loading}
-              className="p-1 rounded-md text-gray-400 hover:text-violet-600 hover:bg-violet-50 transition-colors disabled:opacity-40"
-              title="Refresh DeFi positions"
-            >
-              <RefreshCw size={13} className={loading ? 'animate-spin text-violet-400' : ''} />
-            </button>
-          )}
-          <a href="/defi" className="text-xs text-violet-600 hover:text-violet-800 flex items-center gap-0.5">
-            See all <ChevronRight size={12} />
+        /* Divider */
+        .land-divider {
+          height: 1px;
+          background: linear-gradient(90deg, transparent, var(--land-border), transparent);
+          margin: 0 2rem;
+        }
+
+        /* Footer */
+        .land-footer {
+          text-align: center; padding: 2.5rem 2rem;
+          color: var(--land-muted); font-size: 0.85rem;
+          border-top: 1px solid var(--land-border);
+        }
+        .land-footer a { color: var(--land-violet); text-decoration: none; }
+        .land-footer a:hover { text-decoration: underline; }
+
+        @media (max-width: 640px) {
+          .land-header { padding: 0 1rem; }
+          .land-section { padding: 4rem 1.25rem; }
+        }
+      `}} />
+
+      <div className="land">
+
+        {/* ── Fixed Header ── */}
+        <header className="land-header">
+          <a href="/landing" className="land-logo">
+            <div className="land-logo-dot">M</div>
+            Mon<span style={{ color: '#836EF9' }}>Board</span>
           </a>
-        </div>
-      </div>
+          <Link href="/dashboard" className="btn-launch">
+            Launch Dashboard <span>→</span>
+          </Link>
+        </header>
 
-      {/* Not connected */}
-      {!isConnected && (
-        <div className="flex flex-col items-center justify-center py-8 gap-2 text-center">
-          <div className="w-10 h-10 rounded-xl bg-violet-50 flex items-center justify-center">
-            <Zap size={18} className="text-violet-400" />
+        {/* ── Hero ── */}
+        <section style={{ position: 'relative', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', paddingTop: '64px' }}>
+          <div className="land-hero-bg">
+            <div className="land-grid" />
+            <div className="orb orb-1" />
+            <div className="orb orb-2" />
+            <div className="orb orb-3" />
           </div>
-          <p className="text-sm text-gray-400">Connect your wallet to see DeFi positions</p>
-        </div>
-      )}
 
-      {/* Loading skeletons */}
-      {isConnected && loading && (
-        <div className="space-y-4">
-          {[...Array(3)].map((_, i) => (
-            <div key={i} className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-lg bg-gray-100 animate-pulse" />
-                  <div className="space-y-1">
-                    <div className="w-24 h-3 bg-gray-100 rounded animate-pulse" />
-                    <div className="w-16 h-2.5 bg-gray-50 rounded animate-pulse" />
-                  </div>
-                </div>
-                <div className="space-y-1 items-end flex flex-col">
-                  <div className="w-16 h-3 bg-gray-100 rounded animate-pulse" />
-                  <div className="w-12 h-2.5 bg-gray-50 rounded animate-pulse" />
-                </div>
-              </div>
-              <div className="progress-bar"><div className="progress-fill animate-pulse" style={{ width: '60%' }} /></div>
+          <div style={{ position: 'relative', textAlign: 'center', maxWidth: '820px', margin: '0 auto', padding: '4rem 2rem' }}>
+            <div className="reveal d1">
+              <span className="tag" style={{ fontSize: '0.75rem', padding: '0.3rem 0.8rem', marginBottom: '1.5rem', display: 'inline-block' }}>
+                🟣 Built for Monad Ecosystem
+              </span>
             </div>
-          ))}
-        </div>
-      )}
 
-      {/* No positions found */}
-      {isConnected && !loading && top3.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-16 gap-2 text-center">
-          <p className="text-sm text-gray-400">No DeFi positions found</p>
-          <p className="text-xs text-gray-300">Your active positions will appear here</p>
-        </div>
-      )}
+            <h1 className="land-h1 reveal d2" style={{ marginBottom: '1.5rem' }}>
+              Your Monad portfolio,{' '}
+              <span className="grad-text">fully in view</span>
+            </h1>
 
-      {/* Top 3 real positions */}
-      {isConnected && !loading && top3.length > 0 && (
-        <div className="space-y-4">
-          {top3.map((pos, i) => {
-            const value      = pos.netValueUSD ?? 0
-            const apy        = getApy(pos)
-            const percentage = total > 0 ? (value / total) * 100 : 0
-            const label      = pos.label ?? pos.asset ?? ''
+            <p className="reveal d3" style={{ fontSize: 'clamp(1rem, 2.5vw, 1.2rem)', color: 'var(--land-muted)', lineHeight: 1.7, maxWidth: '580px', margin: '0 auto 2.5rem' }}>
+              Track tokens, DeFi positions, NFTs and transaction history across the entire Monad ecosystem — in one clean, real-time dashboard. Free forever.
+            </p>
 
-            return (
-              <div key={`${pos.protocol}-${i}`} className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xl">{pos.logo}</span>
-                    <div>
-                      <p className="text-sm font-semibold text-gray-800">{pos.protocol}</p>
-                      <p className="text-xs text-gray-400">
-                        {typeLabel(pos.type)}
-                        {label ? ` · ${label}` : ''}
-                        {apy != null ? ` · ${apy.toFixed(1)}% APY` : ''}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm font-bold text-gray-800">{fmtValue(value)}</p>
-                    {apy != null && apy > 0 && (
-                      <p className="text-xs text-emerald-600 font-medium">+{apy.toFixed(1)}% APY</p>
-                    )}
-                  </div>
+            <div className="reveal d4" style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+              <Link href="/dashboard" className="btn-launch btn-launch-lg">
+                Launch Dashboard →
+              </Link>
+              <a href="#features" className="btn-launch-outline">
+                Explore features
+              </a>
+            </div>
+
+            {/* Hero mini-stat strip */}
+            <div className="reveal d5" style={{ marginTop: '4rem', display: 'flex', justifyContent: 'center', gap: '2.5rem', flexWrap: 'wrap', opacity: 0.6, fontSize: '0.85rem' }}>
+              {['14+ protocols', '10+ features', 'Free to use', 'Live data'].map(s => (
+                <span key={s} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span style={{ color: '#836EF9', fontSize: '1rem' }}>✦</span> {s}
+                </span>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ── Stats ── */}
+        <div className="land-divider" />
+        <section className="land-section" style={{ paddingTop: '4rem', paddingBottom: '4rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem' }}>
+            {STATS.map(({ label, value, suffix }) => (
+              <div key={label} className="stat-card">
+                <div className="stat-num">
+                  <Counter to={value} suffix={suffix} />
                 </div>
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${Math.min(percentage, 100)}%` }} />
-                </div>
-                <p className="text-xs text-gray-400 text-right">{percentage.toFixed(1)}% of DeFi</p>
+                <p style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--land-muted)' }}>{label}</p>
               </div>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
-}
+            ))}
+          </div>
+        </section>
 
-// ─── NFT Gating Banner ────────────────────────────────────────────────────────
-function NFTGatingBanner() {
-  return (
-    <div className="rounded-xl border border-violet-200 bg-gradient-to-r from-violet-50 to-purple-50 p-4 flex items-center gap-3">
-      <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center shrink-0">
-        <Bell size={18} className="text-white" />
+        {/* ── Features ── */}
+        <div className="land-divider" />
+        <section className="land-section" id="features">
+          <div style={{ textAlign: 'center', marginBottom: '3.5rem' }}>
+            <span className="tag" style={{ marginBottom: '1rem', display: 'inline-block' }}>Features</span>
+            <h2 className="land-h2">Everything you need to navigate Monad</h2>
+            <p style={{ color: 'var(--land-muted)', marginTop: '0.75rem', maxWidth: '520px', margin: '0.75rem auto 0' }}>
+              From portfolio tracking to yield hunting — all your on-chain activity, organized.
+            </p>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1rem' }}>
+            {FEATURES.map(({ icon, title, desc, tag }) => (
+              <div key={title} className="feat-card">
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.875rem' }}>
+                  <span style={{ fontSize: '1.75rem', lineHeight: 1 }}>{icon}</span>
+                  <span className="tag">{tag}</span>
+                </div>
+                <h3 style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: '1.05rem', marginBottom: '0.5rem' }}>
+                  {title}
+                </h3>
+                <p style={{ color: 'var(--land-muted)', fontSize: '0.875rem', lineHeight: 1.65 }}>{desc}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* ── Protocol integrations ── */}
+        <div className="land-divider" />
+        <section style={{ padding: '4rem 0' }}>
+          <div style={{ textAlign: 'center', marginBottom: '2rem', padding: '0 2rem' }}>
+            <span className="tag" style={{ marginBottom: '0.75rem', display: 'inline-block' }}>Integrations</span>
+            <h2 className="land-h2">The whole Monad ecosystem, connected</h2>
+            <p style={{ color: 'var(--land-muted)', marginTop: '0.5rem', fontSize: '0.95rem' }}>
+              Live data from every major protocol — no hardcoded values, ever.
+            </p>
+          </div>
+
+          {/* Scrolling ticker — doubled for seamless loop */}
+          <div className="ticker-wrap" style={{ padding: '0.5rem 0' }}>
+            <div className="ticker">
+              {[...PROTOCOLS, ...PROTOCOLS].map((p, i) => (
+                <span key={i} className="proto-pill">{p}</span>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ── Why MonBoard ── */}
+        <div className="land-divider" />
+        <section className="land-section">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1.5rem', alignItems: 'center' }}>
+            <div>
+              <span className="tag" style={{ marginBottom: '1rem', display: 'inline-block' }}>Why MonBoard</span>
+              <h2 className="land-h2" style={{ marginBottom: '1rem' }}>
+                Built for Monad.<br />
+                <span className="grad-text">By Shinka Labs.</span>
+              </h2>
+              <p style={{ color: 'var(--land-muted)', lineHeight: 1.75, fontSize: '0.95rem' }}>
+                MonBoard is crafted specifically for the Monad ecosystem — not a generic multi-chain dashboard with Monad added as an afterthought. Every integration is native, every data point is live, and every feature is designed around how Monad actually works.
+              </p>
+              <div style={{ marginTop: '1.75rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                <Link href="/dashboard" className="btn-launch">Open dashboard →</Link>
+                <a href="https://x.com/XShinkaLabsX" target="_blank" rel="noopener noreferrer" className="btn-launch-outline" style={{ fontSize: '0.9rem', padding: '0.6rem 1.25rem' }}>
+                  Follow updates
+                </a>
+              </div>
+            </div>
+
+            {/* Checklist */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {[
+                'Real-time data — no caching delays',
+                '14+ native Monad protocol integrations',
+                'Cross-chain swaps built in',
+                'Security scanner for approvals',
+                'Portfolio history up to 1 year',
+                'Fully free, no wallet required to browse',
+                'Dark mode & mobile responsive',
+              ].map(item => (
+                <div key={item} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', padding: '0.75rem 1rem', background: 'var(--land-card)', borderRadius: '10px', border: '1px solid var(--land-border)' }}>
+                  <span style={{ color: '#836EF9', fontSize: '1rem', flexShrink: 0, marginTop: '0.05rem' }}>✦</span>
+                  <span style={{ fontSize: '0.875rem', color: 'var(--land-text)' }}>{item}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ── Final CTA ── */}
+        <div className="land-divider" />
+        <section style={{ textAlign: 'center', padding: '7rem 2rem', position: 'relative', overflow: 'hidden' }}>
+          <div style={{
+            position: 'absolute', inset: 0, pointerEvents: 'none',
+            background: 'radial-gradient(ellipse 70% 60% at 50% 50%, rgba(131,110,249,0.12) 0%, transparent 70%)',
+          }} />
+          <span className="tag" style={{ marginBottom: '1.5rem', display: 'inline-block' }}>Get started</span>
+          <h2 className="land-h2" style={{ marginBottom: '1rem', maxWidth: '600px', margin: '0 auto 1rem' }}>
+            Start tracking your Monad portfolio today
+          </h2>
+          <p style={{ color: 'var(--land-muted)', marginBottom: '2.5rem', fontSize: '1rem' }}>
+            Free forever. No sign-up. Just connect your wallet.
+          </p>
+          <Link href="/dashboard" className="btn-launch btn-launch-lg">
+            Launch Dashboard →
+          </Link>
+        </section>
+
+        {/* ── Footer ── */}
+        <footer className="land-footer">
+          <p>
+            Built by{' '}
+            <a href="https://www.shinkalabs.tech/" target="_blank" rel="noopener noreferrer">Shinka Labs</a>
+            {' '}· MonBoard 🟣 ·{' '}
+            <a href="https://t.me/ShinkaLabs" target="_blank" rel="noopener noreferrer">Telegram</a>
+            {' '}·{' '}
+            <a href="https://x.com/XShinkaLabsX" target="_blank" rel="noopener noreferrer">Twitter</a>
+            {' '}·{' '}
+            <a href="https://discord.gg/n6V8WV5ZN4" target="_blank" rel="noopener noreferrer">Discord</a>
+          </p>
+        </footer>
+
       </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-violet-900">Unlock Telegram Alerts</p>
-        <p className="text-xs text-violet-600 mt-0.5">
-          Soon you will be able to receive real-time wallet alerts via Telegram and monitor other wallets.
-        </p>
-      </div>
-      <button className="shrink-0 btn-primary text-xs px-4 py-2">Coming soon</button>
-    </div>
-  )
-}
-
-// ─── Sponsors Banner ──────────────────────────────────────────────────────────
-function SponsorsBanner() {
-  return (
-    <div className="card p-5">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="font-display font-semibold text-gray-800 text-sm" style={SORA}>
-          Partners & Sponsors
-        </h3>
-        <a href="https://forms.gle/2tqw8FWy1JD2Rd4s6" target="_blank" rel="noopener noreferrer" className="text-xs text-violet-600">Become a partner →</a>
-      </div>
-      <div className="flex items-center justify-center gap-8 py-6 border border-dashed border-violet-200 rounded-xl">
-        <p className="text-sm text-gray-400 font-medium">Advertise your project here</p>
-      </div>
-    </div>
-  )
-}
-
-// ─── Main Dashboard ───────────────────────────────────────────────────────────
-export default function Dashboard() {
-  return (
-    <div className="max-w-7xl mx-auto px-4 py-6 space-y-5">
-      <NFTGatingBanner />
-
-      {/* Hero Row: Wallet Summary + Recent Activity */}
-      {/* Left col is flex-col so AdBanner stretches to fill the gap below WalletSummary */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5 lg:items-stretch">
-        <div className="lg:col-span-3 flex flex-col gap-5">
-          <WalletSummary />
-          <AdBanner className="flex-1 rounded-xl" />
-        </div>
-        <div className="lg:col-span-2">
-          <RecentActivity />
-        </div>
-      </div>
-
-      {/* Middle Row: Token Allocation + DeFi Positions */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <TokenExposure />
-        <DeFiPositions />
-      </div>
-
-      {/* Portfolio History Chart */}
-      <PortfolioHistory />
-
-      {/* Top Earners — 24h gainers in the Monad ecosystem */}
-      <TopEarners />
-
-      {/* Bottom Row: Top Tokens + Fear & Greed + Ad */}
-      {/* Right col is flex-col so AdBanner stretches to fill space below Fear & Greed */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 lg:items-stretch">
-        <div className="lg:col-span-2"><TopTokens /></div>
-        <div className="lg:col-span-1 flex flex-col gap-5">
-          <FearAndGreed />
-          <AdBanner className="flex-1 rounded-xl" />
-        </div>
-      </div>
-
-      <SponsorsBanner />
-    </div>
+    </>
   )
 }
