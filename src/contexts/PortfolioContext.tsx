@@ -111,28 +111,42 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   const lastAddr      = useRef<string | null>(null)  // track last loaded address
 
   const flush = useCallback((addr: string, final = false) => {
+    const key = addr.toLowerCase()
     const t = tokenRef.current
     const n = nftRef.current
     const d = defiRef.current.defiNetValueUSD ?? 0
+
+    // Protect defiPositions: never overwrite a non-empty list with an empty one.
+    // This prevents a partial flush (e.g. tokens arriving before defi) from
+    // caching an empty defiPositions and making positions disappear on navigation.
+    const prevCached      = portfolioCache.get(key)
+    const newPositions    = defiRef.current.defiPositions ?? []
+    const safePositions   = newPositions.length > 0
+      ? newPositions
+      : (prevCached?.totals.defiPositions ?? [])
+
     const next: PortfolioTotals = {
       tokenValueUSD:       t,
       nftValueUSD:         n,
       defiNetValueUSD:     d,
       totalValueUSD:       t + n + d,
-      defiActiveProtocols: defiRef.current.defiActiveProtocols ?? [],
+      defiActiveProtocols: defiRef.current.defiActiveProtocols?.length
+        ? defiRef.current.defiActiveProtocols
+        : (prevCached?.totals.defiActiveProtocols ?? []),
       defiTotalDebtUSD:    defiRef.current.defiTotalDebtUSD    ?? 0,
       defiTotalSupplyUSD:  defiRef.current.defiTotalSupplyUSD  ?? 0,
-      defiPositions:       defiRef.current.defiPositions       ?? [],
+      defiPositions:       safePositions,
       tokens:              tokenListRef.current,
       nfts:                nftListRef.current,
       nftTotal:            nftTotalRef.current,
       nftsNoKey:           nftsNoKeyRef.current,
     }
     setTotals(next)
-    // Only write to cache when fully complete — prevents partial data (e.g. empty
-    // defiPositions from a mid-flight flush) from being served on next navigation
-    if (final) {
-      portfolioCache.set(addr.toLowerCase(), { totals: next, fetchedAt: Date.now() })
+
+    // Write to cache on final flush OR whenever we have defi positions
+    // (so navigation always finds complete data)
+    if (final || safePositions.length > 0) {
+      portfolioCache.set(key, { totals: next, fetchedAt: final ? Date.now() : (prevCached?.fetchedAt ?? Date.now()) })
     }
   }, [])
 
@@ -212,7 +226,10 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
 
     const fetchDefi = async () => {
       try {
-        const data = await cachedFetch<any>('/api/defi', addr)
+        // Force fresh fetch — bypass dataCache to avoid serving stale empty positions
+        const res  = await fetch(`/api/defi?address=${encodeURIComponent(addr)}`)
+        if (!res.ok) return
+        const data = await res.json()
         if (loadingAddr.current !== key) return
         const s    = data.summary ?? {}
         defiRef.current = {
