@@ -602,13 +602,17 @@ async function fetchDeFiLlamaTvls(): Promise<Map<string, number>> {
 // ─── MERKL — busca unificada de todas as oportunidades Monad ─────────────────
 async function fetchMerklAll(): Promise<any[]> {
   try {
-    const res = await fetch(
-      'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=300',
-      { signal: AbortSignal.timeout(12_000), cache: 'no-store', headers: { 'Accept': 'application/json' } }
-    )
-    if (!res.ok) return []
-    const raw = await res.json()
-    return Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
+    // Merkl limits to 100 items/page — fetch pages 1-3 in parallel
+    const pages = await Promise.all([1, 2, 3].map(page =>
+      fetch(
+        `https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=100&page=${page}`,
+        { signal: AbortSignal.timeout(12_000), cache: 'no-store', headers: { 'Accept': 'application/json' } }
+      ).then(r => r.ok ? r.json() : null).catch(() => null)
+    ))
+    return pages.flatMap(raw => {
+      if (!raw) return []
+      return Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
+    })
   } catch { return [] }
 }
 
