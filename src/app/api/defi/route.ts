@@ -457,12 +457,13 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
 }
 
 // ─── CURVE ────────────────────────────────────────────────────────────────────
+
 async function fetchCurve(user: string): Promise<any[]> {
   const BASE        = 'https://api-core.curve.finance/v1'
   const paddedAddr  = user.slice(2).toLowerCase().padStart(64, '0')
   const poolTypes   = ['factory-twocrypto', 'factory-stable-ng']
 
-  // Fetch pool lists — each independently so one failure doesn't kill the other
+  // Fetch pool lists — failures are independent
   const poolResults = await Promise.allSettled(
     poolTypes.map(t =>
       fetch(`${BASE}/getPools/monad/${t}`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
@@ -479,8 +480,8 @@ async function fetchCurve(user: string): Promise<any[]> {
   }
   if (allPools.length === 0) return []
 
-  // balanceOf(user) for each pool LP token — sequential batches to avoid timeout
-  const CHUNK = 15
+  // balanceOf(user) for each pool LP token — chunked to avoid timeout
+  const CHUNK      = 15
   const rpcResults: any[] = []
   for (let start = 0; start < allPools.length; start += CHUNK) {
     const chunk = allPools.slice(start, start + CHUNK)
@@ -499,11 +500,8 @@ async function fetchCurve(user: string): Promise<any[]> {
   const positions: any[] = []
 
   for (let i = 0; i < allPools.length; i++) {
-    // Coerce id to number to handle string/number mismatch from rpcBatch
     const r   = rpcResults.find((x: any) => Number(x.id) === i)
     const raw = r?.result ?? '0x'
-
-    // Skip zero / empty balances
     if (!raw || raw === '0x' || raw === '0x' + '0'.repeat(64)) continue
     let balanceRaw: bigint
     try { balanceRaw = BigInt(raw) } catch { continue }
@@ -522,8 +520,11 @@ async function fetchCurve(user: string): Promise<any[]> {
 
     if (netValueUSD < 0.01) continue
 
-    const coins = pool.coins?.map((c: any) => c.symbol) ?? []
+    const coins  = pool.coins?.map((c: any) => c.symbol) ?? []
     const poolId = pool.id ?? pool.address
+
+    // APR injected post-processing via injectBestAprs()
+    const apy = 0
 
     positions.push({
       protocol: 'Curve', type: 'liquidity', logo: '🌊',
@@ -531,7 +532,7 @@ async function fetchCurve(user: string): Promise<any[]> {
       label:     pool.name ?? coins.join('/'),
       tokens:    coins,
       amountUSD: netValueUSD,
-      apy:       0,       // APR skipped — eth_getLogs too heavy for edge runtime
+      apy,
       netValueUSD,
       inRange:   null,
     })
@@ -880,6 +881,88 @@ async function fetchEulerV2(user: string): Promise<any[]> {
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
+// ─── UNIFIED APR INJECTION ───────────────────────────────────────────────────
+// Fetches best-aprs once and injects APR into every position that has apy === 0.
+// Matching order:
+//   1. protocol + sorted tokens  (most precise — pool positions)
+//   2. protocol + asset/label    (vault/lend positions)
+//   3. protocol only             (fallback — use best APR for that protocol)
+
+type AprLookup = Map<string, number>  // key → apr%
+
+async function loadBestAprs(): Promise<AprLookup> {
+  const map = new Map<string, number>()
+  try {
+    const origin = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://monboardbeta.pages.dev'
+    const res = await fetch(`${origin}/api/best-aprs`, {
+      signal: AbortSignal.timeout(6_000), cache: 'no-store',
+    })
+    if (!res.ok) return map
+    const data = await res.json()
+
+    // Flatten all categories
+    const entries: any[] = [
+      ...(data?.pools    ?? []),
+      ...(data?.vaults   ?? []),
+      ...(data?.lends    ?? []),
+      ...(data?.stableAPRs ?? []),
+    ]
+
+    for (const e of entries) {
+      const proto = String(e.protocol ?? '')
+      const apr   = Number(e.apr ?? 0)
+      if (!proto || apr <= 0) continue
+
+      // Key 1: protocol + sorted tokens
+      if (Array.isArray(e.tokens) && e.tokens.length > 0) {
+        const tokKey = proto + ':' + e.tokens.slice().sort().join('+')
+        if ((map.get(tokKey) ?? 0) < apr) map.set(tokKey, apr)
+      }
+
+      // Key 2: protocol + label (first token / asset alias)
+      const labelKey = proto + ':' + String(e.label ?? '').toLowerCase().trim()
+      if (labelKey.length > proto.length + 1 && (map.get(labelKey) ?? 0) < apr) {
+        map.set(labelKey, apr)
+      }
+
+      // Key 3: protocol fallback (highest APR for that protocol)
+      if ((map.get(proto) ?? 0) < apr) map.set(proto, apr)
+    }
+  } catch { /* silently ignore — positions still show with apy=0 */ }
+  return map
+}
+
+function lookupApr(map: AprLookup, pos: any): number {
+  const proto  = String(pos.protocol ?? '')
+  const tokens: string[] = pos.tokens ?? (pos.asset ? [pos.asset] : [])
+
+  // 1. by tokens
+  if (tokens.length > 0) {
+    const k = proto + ':' + tokens.slice().sort().join('+')
+    if (map.has(k)) return map.get(k)!
+  }
+
+  // 2. by label
+  const label = String(pos.label ?? pos.asset ?? '').toLowerCase().trim()
+  if (label) {
+    const k = proto + ':' + label
+    if (map.has(k)) return map.get(k)!
+  }
+
+  // 3. fallback: best APR for this protocol
+  return map.get(proto) ?? 0
+}
+
+function injectBestAprs(positions: any[], map: AprLookup): any[] {
+  return positions.map(pos => {
+    // Don't override if fetcher already set a non-zero APY (Morpho, Upshift)
+    if ((pos.apy ?? 0) > 0) return pos
+    const apr = lookupApr(map, pos)
+    if (apr <= 0) return pos
+    return { ...pos, apy: apr }
+  })
+}
+
 export async function GET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address')
   if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
@@ -903,23 +986,28 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, kintsuR, magmaR, shmonadR, lagoonR, kuruR, curvanceR, eulerR] =
-    await Promise.allSettled([
-      safeFetch('Neverland',     () => fetchNeverland(address)),
-      safeFetch('Morpho',        () => fetchMorpho(address)),
-      safeFetch('UniswapV3',     () => fetchUniswapV3(address, 'Uniswap V3',    UNI_NFT_PM, UNI_FACTORY)),
-      safeFetch('PancakeswapV3', () => fetchUniswapV3(address, 'PancakeSwap V3', '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364', '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865')),
-      safeFetch('Curve',         () => fetchCurve(address)),
-      safeFetch('Gearbox',       () => fetchGearbox(address)),
-      safeFetch('Upshift',       () => fetchUpshift(address)),
-      safeFetch('Kintsu',        () => fetchKintsu(address, MON_PRICE)),
-      safeFetch('Magma',         () => fetchMagma(address, MON_PRICE)),
-      safeFetch('ShMonad',       () => fetchShMonad(address, MON_PRICE)),
-      safeFetch('Lagoon',        () => fetchLagoon(address)),
-      safeFetch('Kuru',          () => fetchKuru(address)),
-      safeFetch('Curvance',      () => fetchCurvance(address)),
-      safeFetch('EulerV2',       () => fetchEulerV2(address)),
+  // Load best-aprs in parallel with all fetchers — one cached request enriches APRs for all protocols
+  const [bestAprsMap, [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, kintsuR, magmaR, shmonadR, lagoonR, kuruR, curvanceR, eulerR]] =
+    await Promise.all([
+      loadBestAprs(),
+      Promise.allSettled([
+        safeFetch('Neverland',     () => fetchNeverland(address)),
+        safeFetch('Morpho',        () => fetchMorpho(address)),
+        safeFetch('UniswapV3',     () => fetchUniswapV3(address, 'Uniswap V3',    UNI_NFT_PM, UNI_FACTORY)),
+        safeFetch('PancakeswapV3', () => fetchUniswapV3(address, 'PancakeSwap V3', '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364', '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865')),
+        safeFetch('Curve',         () => fetchCurve(address)),
+        safeFetch('Gearbox',       () => fetchGearbox(address)),
+        safeFetch('Upshift',       () => fetchUpshift(address)),
+        safeFetch('Kintsu',        () => fetchKintsu(address, MON_PRICE)),
+        safeFetch('Magma',         () => fetchMagma(address, MON_PRICE)),
+        safeFetch('ShMonad',       () => fetchShMonad(address, MON_PRICE)),
+        safeFetch('Lagoon',        () => fetchLagoon(address)),
+        safeFetch('Kuru',          () => fetchKuru(address)),
+        safeFetch('Curvance',      () => fetchCurvance(address)),
+        safeFetch('EulerV2',       () => fetchEulerV2(address)),
+      ])
     ])
+  ])
 
   function unwrap(r: PromiseSettledResult<any[]>): any[] {
     return r.status === 'fulfilled' ? r.value : []
@@ -955,6 +1043,9 @@ export async function GET(req: NextRequest) {
     ...unwrap(kintsuR), ...unwrap(magmaR), ...unwrap(shmonadR),
     ...unwrap(lagoonR), ...unwrap(kuruR), ...unwrap(curvanceR), ...unwrap(eulerR),
   ]
+
+  // Inject APRs from best-aprs for all positions where apy === 0
+  allPositions = injectBestAprs(allPositions, bestAprsMap)
 
   // Pos-processamento: Gearbox WMON precisa do preco do MON
   allPositions = allPositions.map(p => {
