@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { MONAD_RPC as RPC, rpcBatch, getMonPrice } from '@/lib/monad'
 import { getAllPrices } from '@/lib/priceCache'
+import { getAprEntries } from '@/lib/aprCache'
 
 export const revalidate = 0
 function ethCall(to: string, data: string, id: number) {
@@ -882,53 +883,39 @@ async function fetchEulerV2(user: string): Promise<any[]> {
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 // ─── UNIFIED APR INJECTION ───────────────────────────────────────────────────
-// Fetches best-aprs once and injects APR into every position that has apy === 0.
+// Reads from shared aprCache (populated by best-aprs/route.ts) — no HTTP call.
 // Matching order:
 //   1. protocol + sorted tokens  (most precise — pool positions)
 //   2. protocol + asset/label    (vault/lend positions)
-//   3. protocol only             (fallback — use best APR for that protocol)
+//   3. protocol only             (fallback — highest APR for that protocol)
 
-type AprLookup = Map<string, number>  // key → apr%
+type AprLookup = Map<string, number>
 
-async function loadBestAprs(): Promise<AprLookup> {
-  const map = new Map<string, number>()
-  try {
-    const origin = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://monboardbeta.pages.dev'
-    const res = await fetch(`${origin}/api/best-aprs`, {
-      signal: AbortSignal.timeout(6_000), cache: 'no-store',
-    })
-    if (!res.ok) return map
-    const data = await res.json()
+function buildAprLookup(): AprLookup {
+  const map  = new Map<string, number>()
+  const entries = getAprEntries()
+  if (!entries) return map  // cache not yet warm — positions still show with apy=0
 
-    // Flatten all categories
-    const entries: any[] = [
-      ...(data?.pools    ?? []),
-      ...(data?.vaults   ?? []),
-      ...(data?.lends    ?? []),
-      ...(data?.stableAPRs ?? []),
-    ]
+  for (const e of entries) {
+    const proto = String(e.protocol ?? '')
+    const apr   = Number(e.apr ?? 0)
+    if (!proto || apr <= 0) continue
 
-    for (const e of entries) {
-      const proto = String(e.protocol ?? '')
-      const apr   = Number(e.apr ?? 0)
-      if (!proto || apr <= 0) continue
-
-      // Key 1: protocol + sorted tokens
-      if (Array.isArray(e.tokens) && e.tokens.length > 0) {
-        const tokKey = proto + ':' + e.tokens.slice().sort().join('+')
-        if ((map.get(tokKey) ?? 0) < apr) map.set(tokKey, apr)
-      }
-
-      // Key 2: protocol + label (first token / asset alias)
-      const labelKey = proto + ':' + String(e.label ?? '').toLowerCase().trim()
-      if (labelKey.length > proto.length + 1 && (map.get(labelKey) ?? 0) < apr) {
-        map.set(labelKey, apr)
-      }
-
-      // Key 3: protocol fallback (highest APR for that protocol)
-      if ((map.get(proto) ?? 0) < apr) map.set(proto, apr)
+    // Key 1: protocol + sorted tokens
+    if (Array.isArray(e.tokens) && e.tokens.length > 0) {
+      const k = proto + ':' + e.tokens.slice().sort().join('+')
+      if ((map.get(k) ?? 0) < apr) map.set(k, apr)
     }
-  } catch { /* silently ignore — positions still show with apy=0 */ }
+
+    // Key 2: protocol + normalised label
+    const labelKey = proto + ':' + String(e.label ?? '').toLowerCase().trim()
+    if (labelKey.length > proto.length + 1 && (map.get(labelKey) ?? 0) < apr) {
+      map.set(labelKey, apr)
+    }
+
+    // Key 3: protocol fallback
+    if ((map.get(proto) ?? 0) < apr) map.set(proto, apr)
+  }
   return map
 }
 
@@ -936,26 +923,22 @@ function lookupApr(map: AprLookup, pos: any): number {
   const proto  = String(pos.protocol ?? '')
   const tokens: string[] = pos.tokens ?? (pos.asset ? [pos.asset] : [])
 
-  // 1. by tokens
   if (tokens.length > 0) {
     const k = proto + ':' + tokens.slice().sort().join('+')
     if (map.has(k)) return map.get(k)!
   }
 
-  // 2. by label
   const label = String(pos.label ?? pos.asset ?? '').toLowerCase().trim()
   if (label) {
     const k = proto + ':' + label
     if (map.has(k)) return map.get(k)!
   }
 
-  // 3. fallback: best APR for this protocol
   return map.get(proto) ?? 0
 }
 
 function injectBestAprs(positions: any[], map: AprLookup): any[] {
   return positions.map(pos => {
-    // Don't override if fetcher already set a non-zero APY (Morpho, Upshift)
     if ((pos.apy ?? 0) > 0) return pos
     const apr = lookupApr(map, pos)
     if (apr <= 0) return pos
@@ -1040,9 +1023,9 @@ export async function GET(req: NextRequest) {
     ...unwrap(lagoonR), ...unwrap(kuruR), ...unwrap(curvanceR), ...unwrap(eulerR),
   ]
 
-  // Inject APRs from best-aprs (runs after fetchers — avoids CF Worker self-HTTP contention)
-  // best-aprs is cached at 3-min TTL so this adds ~0ms when warm
-  const bestAprsMap = await loadBestAprs()
+  // Inject APRs from shared aprCache — synchronous, no HTTP, zero latency
+  // Cache is populated by best-aprs/route.ts on first best-aprs call
+  const bestAprsMap = buildAprLookup()
   allPositions = injectBestAprs(allPositions, bestAprsMap)
 
   // Pos-processamento: Gearbox WMON precisa do preco do MON
