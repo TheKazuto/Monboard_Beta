@@ -1,8 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
-import Navbar from '@/components/Navbar'
-import BottomBar from '@/components/BottomBar'
 import Providers from '@/components/Providers'
+import ConditionalShell from '@/components/ConditionalShell'
 
 export const metadata: Metadata = {
   title: 'MonBoard — Your Monad DeFi Dashboard',
@@ -37,11 +36,9 @@ export default function RootLayout({
       </head>
       <body className="min-h-screen" style={{ background: 'var(--ink-bg)' }}>
         <Providers>
-          <Navbar />
-          <main className="page-content pt-16">
+          <ConditionalShell>
             {children}
-          </main>
-          <BottomBar />
+          </ConditionalShell>
         </Providers>
       </body>
     </html>
