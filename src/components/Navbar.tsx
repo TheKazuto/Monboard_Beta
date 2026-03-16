@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { LayoutDashboard, Wallet, BarChart3, History, User, Menu, X, Zap, ArrowLeftRight, Shield, TrendingUp } from 'lucide-react'
+import { LayoutDashboard, Wallet, BarChart3, History, User, Menu, X, ArrowLeftRight, Shield, TrendingUp, Banknote } from 'lucide-react'
 import { ConnectButton } from '@rainbow-me/rainbowkit'
 
 // Stable style object for the logo wordmark
@@ -15,6 +15,7 @@ const navLinks = [
   { href: '/defi',         label: 'DeFi Positions', icon: BarChart3 },
   { href: '/best-aprs',    label: 'Best APRs',      icon: TrendingUp },
   { href: '/swap',         label: 'Swap/Bridge',    icon: ArrowLeftRight },
+  { href: '/onramp',       label: 'Fiat/Crypto',    icon: Banknote },
   { href: '/security',     label: 'Security',       icon: Shield },
   { href: '/transactions', label: 'Transactions',   icon: History },
   { href: '/account',      label: 'Account',        icon: User },
@@ -51,7 +52,9 @@ export default function Navbar() {
             return (
               <Link key={href} href={href}
                 className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-all duration-200 whitespace-nowrap ${
-                  isActive ? 'bg-violet-100 text-violet-700' : 'text-gray-600 hover:text-violet-700 hover:bg-violet-50'
+                  isActive
+                    ? 'bg-violet-100 text-violet-700'
+                    : 'text-gray-600 hover:text-violet-700 hover:bg-violet-50'
                 }`}
               >
                 <Icon size={14} />
