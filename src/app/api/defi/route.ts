@@ -943,6 +943,30 @@ export async function GET(req: NextRequest) {
     return r.status === 'fulfilled' ? r.value : []
   }
 
+  // Debug: expose per-fetcher results when ?debug=1
+  if (debugMode) {
+    const named = [
+      ['Neverland',    nevR],    ['Morpho',      morphoR],
+      ['UniswapV3',    uniR],    ['PancakeswapV3', pcakeR],
+      ['Curve',        curveR],  ['Gearbox',     gearR],
+      ['Upshift',      upshiftR],['Kintsu',       kintsuR],
+      ['Magma',        magmaR],  ['ShMonad',      shmonadR],
+      ['Lagoon',       lagoonR], ['Kuru',         kuruR],
+      ['Curvance',     curvanceR],['EulerV2',     eulerR],
+    ] as [string, PromiseSettledResult<any[]>][]
+    return NextResponse.json({
+      __debug: true,
+      monPrice: MON_PRICE,
+      fetchers: named.map(([name, r]) => ({
+        name,
+        status: r.status,
+        count: r.status === 'fulfilled' ? r.value.length : 0,
+        positions: r.status === 'fulfilled' ? r.value : [],
+        error: r.status === 'rejected' ? String(r.reason) : null,
+      })),
+    })
+  }
+
   let allPositions = [
     ...unwrap(nevR), ...unwrap(morphoR), ...unwrap(uniR), ...unwrap(pcakeR),
     ...unwrap(curveR), ...unwrap(gearR), ...unwrap(upshiftR),
