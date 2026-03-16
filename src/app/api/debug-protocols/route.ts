@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 // Testa o buildAprLookup e mostra o que o Merkl retorna
 // GET /api/debug-apr?protocol=Curve&tokens=WMON,shMON,sMON,gMON
 
-const MERKL_API = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=300'
+const MERKL_BASE = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=100'
 
 const PROTO_MAP: Record<string, string> = {
   curve: 'Curve', uniswap: 'Uniswap V3', pancakeswap: 'PancakeSwap V3',
@@ -22,20 +22,21 @@ export async function GET(req: NextRequest) {
   // 1. Fetch Merkl
   let rawData: any[] = []
   try {
-    const res = await fetch(MERKL_API, {
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
-      headers: { 'Accept': 'application/json' },
+    const pages = await Promise.all([1, 2, 3].map(page =>
+      fetch(`${MERKL_BASE}&page=${page}`, {
+        signal: AbortSignal.timeout(10_000), cache: 'no-store',
+        headers: { 'Accept': 'application/json' },
+      }).then(async r => {
+        trace[`page${page}_status`] = r.status
+        if (!r.ok) { trace[`page${page}_body`] = await r.text().catch(() => ''); return null }
+        return r.json()
+      }).catch(e => { trace[`page${page}_error`] = e?.message; return null })
+    ))
+    rawData = pages.flatMap(raw => {
+      if (!raw) return []
+      return Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
     })
-    trace.merkl_status = res.status
-    trace.merkl_ok     = res.ok
-    if (!res.ok) {
-      trace.merkl_body = await res.text().catch(() => '')
-      return NextResponse.json({ ...trace, error: 'Merkl fetch failed' })
-    }
-    const raw = await res.json()
-    rawData = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
     trace.merkl_total_entries = rawData.length
-    trace.merkl_raw_type = Array.isArray(raw) ? 'array' : typeof raw
   } catch (e: any) {
     trace.merkl_error = e?.message ?? String(e)
     return NextResponse.json(trace)
