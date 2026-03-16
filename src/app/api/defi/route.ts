@@ -986,26 +986,23 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Load best-aprs in parallel with all fetchers — one cached request enriches APRs for all protocols
-  const [bestAprsMap, [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, kintsuR, magmaR, shmonadR, lagoonR, kuruR, curvanceR, eulerR]] =
-    await Promise.all([
-      loadBestAprs(),
-      Promise.allSettled([
-        safeFetch('Neverland',     () => fetchNeverland(address)),
-        safeFetch('Morpho',        () => fetchMorpho(address)),
-        safeFetch('UniswapV3',     () => fetchUniswapV3(address, 'Uniswap V3',    UNI_NFT_PM, UNI_FACTORY)),
-        safeFetch('PancakeswapV3', () => fetchUniswapV3(address, 'PancakeSwap V3', '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364', '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865')),
-        safeFetch('Curve',         () => fetchCurve(address)),
-        safeFetch('Gearbox',       () => fetchGearbox(address)),
-        safeFetch('Upshift',       () => fetchUpshift(address)),
-        safeFetch('Kintsu',        () => fetchKintsu(address, MON_PRICE)),
-        safeFetch('Magma',         () => fetchMagma(address, MON_PRICE)),
-        safeFetch('ShMonad',       () => fetchShMonad(address, MON_PRICE)),
-        safeFetch('Lagoon',        () => fetchLagoon(address)),
-        safeFetch('Kuru',          () => fetchKuru(address)),
-        safeFetch('Curvance',      () => fetchCurvance(address)),
-        safeFetch('EulerV2',       () => fetchEulerV2(address)),
-      ])
+  // Fetchers run in parallel — loadBestAprs runs AFTER to avoid self-HTTP contention in CF Workers
+  const [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, kintsuR, magmaR, shmonadR, lagoonR, kuruR, curvanceR, eulerR] =
+    await Promise.allSettled([
+      safeFetch('Neverland',     () => fetchNeverland(address)),
+      safeFetch('Morpho',        () => fetchMorpho(address)),
+      safeFetch('UniswapV3',     () => fetchUniswapV3(address, 'Uniswap V3',    UNI_NFT_PM, UNI_FACTORY)),
+      safeFetch('PancakeswapV3', () => fetchUniswapV3(address, 'PancakeSwap V3', '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364', '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865')),
+      safeFetch('Curve',         () => fetchCurve(address)),
+      safeFetch('Gearbox',       () => fetchGearbox(address)),
+      safeFetch('Upshift',       () => fetchUpshift(address)),
+      safeFetch('Kintsu',        () => fetchKintsu(address, MON_PRICE)),
+      safeFetch('Magma',         () => fetchMagma(address, MON_PRICE)),
+      safeFetch('ShMonad',       () => fetchShMonad(address, MON_PRICE)),
+      safeFetch('Lagoon',        () => fetchLagoon(address)),
+      safeFetch('Kuru',          () => fetchKuru(address)),
+      safeFetch('Curvance',      () => fetchCurvance(address)),
+      safeFetch('EulerV2',       () => fetchEulerV2(address)),
     ])
 
   function unwrap(r: PromiseSettledResult<any[]>): any[] {
@@ -1043,7 +1040,9 @@ export async function GET(req: NextRequest) {
     ...unwrap(lagoonR), ...unwrap(kuruR), ...unwrap(curvanceR), ...unwrap(eulerR),
   ]
 
-  // Inject APRs from best-aprs for all positions where apy === 0
+  // Inject APRs from best-aprs (runs after fetchers — avoids CF Worker self-HTTP contention)
+  // best-aprs is cached at 3-min TTL so this adds ~0ms when warm
+  const bestAprsMap = await loadBestAprs()
   allPositions = injectBestAprs(allPositions, bestAprsMap)
 
   // Pos-processamento: Gearbox WMON precisa do preco do MON
