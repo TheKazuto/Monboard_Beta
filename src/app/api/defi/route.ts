@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { MONAD_RPC as RPC, rpcBatch, getMonPrice } from '@/lib/monad'
 import { getAllPrices } from '@/lib/priceCache'
-import { getAprEntries } from '@/lib/aprCache'
+import { getAprEntries, ensureWarm } from '@/lib/aprCache'
 
 export const revalidate = 0
 function ethCall(to: string, data: string, id: number) {
@@ -544,64 +544,10 @@ async function fetchCurve(user: string): Promise<any[]> {
 
 // ─── GEARBOX ──────────────────────────────────────────────────────────────────
 const GEARBOX_STATIC_URL = 'https://state-cache.gearbox.foundation/Monad.json'
-const GEARBOX_APY_URL    = 'https://state-cache.gearbox.foundation/apy-server/latest.json'
-
-const GEARBOX_TOKEN_MAP: Record<string, { token: string; isStable: boolean }> = {
-  '0x34752948b0dc28969485df2066ffe86d5dc36689': { token: 'WMON', isStable: false },
-  '0x09ca6b76276ec0682adb896418b99cb7e44a58a0': { token: 'WMON', isStable: false },
-  '0x6b343f7b797f1488aa48c49d540690f2b2c89751': { token: 'USDC', isStable: true  },
-  '0xc4173359087ce643235420b7bc610d9b0cf2b82d': { token: 'AUSD', isStable: true  },
-  '0x164a35f31e4e0f6c45d500962a6978d2cbd5a16b': { token: 'USDT', isStable: true  },
-}
-
-async function fetchGearboxAprs(): Promise<Map<string, number>> {
-  const map = new Map<string, number>()
-  try {
-    const [staticRes, apyRes] = await Promise.all([
-      fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
-      fetch(GEARBOX_APY_URL,    { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
-    ])
-
-    // Extra APY (rewards) per pool address
-    const extraApyMap = new Map<string, number>()
-    if (apyRes.ok) {
-      const apyData = await apyRes.json()
-      const pools: any[] = apyData?.chains?.['143']?.pools?.data ?? []
-      const now = Math.floor(Date.now() / 1000)
-      for (const entry of pools) {
-        const addr  = (entry?.pool ?? '').toLowerCase()
-        const extra = (entry?.rewards?.extraAPY ?? [])
-          .filter((e: any) => !e.endTimestamp || e.endTimestamp > now)
-          .reduce((sum: number, e: any) => sum + (Number(e.apy) || 0), 0)
-        if (extra > 0) extraApyMap.set(addr, extra)
-      }
-    }
-
-    if (!staticRes.ok) return map
-    const data     = await staticRes.json()
-    const markets: any[] = data?.markets ?? []
-
-    for (const m of markets) {
-      const pool = m?.pool
-      if (!pool || pool.isPaused) continue
-      const addr       = (pool?.baseParams?.addr ?? '').toLowerCase()
-      const supplyRay  = BigInt(pool?.supplyRate?.__value ?? '0')
-      if (supplyRay === 0n) continue
-      const baseApr  = Number(supplyRay) / 1e27 * 100
-      if (baseApr <= 0 || baseApr > 500) continue
-      const totalApr = baseApr + (extraApyMap.get(addr) ?? 0)
-      map.set(addr, totalApr)
-    }
-  } catch { /* APR stays 0 */ }
-  return map
-}
 
 async function fetchGearbox(user: string): Promise<any[]> {
   try {
-    const [res, aprMap] = await Promise.all([
-      fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
-      fetchGearboxAprs(),
-    ])
+    const res = await fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
     if (!res.ok) return []
     const data = await res.json()
     const markets: any[] = data?.markets ?? []
@@ -630,12 +576,11 @@ async function fetchGearbox(user: string): Promise<any[]> {
       const totalSupply  = BigInt(pool.totalSupply?.__value ?? pool.totalSupply ?? '0')
       let amountUSD = 0
       if (totalSupply > 0n) amountUSD = meta.isStable ? sharesFloat * (Number(expectedLiq) / Number(totalSupply)) : 0
-      const poolApr = aprMap.get((pool?.baseParams?.addr ?? '').toLowerCase()) ?? 0
       positions.push({
         protocol: 'GearBox V3', type: 'vault', logo: '⚙️',
         url: 'https://app.gearbox.fi/pools?chainId=143', chain: 'Monad',
         label: pool.name ?? meta.token, asset: meta.token,
-        shares: sharesFloat, amountUSD, apy: poolApr, netValueUSD: amountUSD,
+        shares: sharesFloat, amountUSD, apy: 0, netValueUSD: amountUSD,
         _needsMonPrice: !meta.isStable,
         // Exchange rate: expectedLiq/totalSupply (both in same raw units — no decimals division needed here)
         // sharesFloat already accounts for decimals; multiplying by this rate gives MON amount
@@ -748,6 +693,9 @@ async function fetchUpshift(user: string): Promise<any[]> {
 
 // ─── KINTSU (sMON LST) ────────────────────────────────────────────────────────
 const KINTSU_SMON = '0xA3227C5969757783154C60bF0bC1944180ed81B9'
+// 0x6ec21cc8 = totalStakedMON() — total MON controlled by the staking contract.
+// APR = (rate_now - rate_past) / rate_past / days * 365 * 100
+// where rate = totalStakedMON / totalSupply(sMON)
 
 async function fetchKintsu(user: string, monPrice: number): Promise<any[]> {
   try {
@@ -990,93 +938,12 @@ async function fetchEulerV2(user: string): Promise<any[]> {
 
 type AprLookup = Map<string, number>
 
-const MERKL_BASE = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=100'
-
-// Module-level Merkl cache — avoid re-fetching within same Worker lifetime
-let merklAprCache: { map: AprLookup; ts: number } | null = null
-const MERKL_TTL = 3 * 60 * 1000
-
-function entriesToLookup(entries: Array<{ protocol: string; tokens: string[]; label: string; apr: number }>): AprLookup {
-  const map = new Map<string, number>()
-  for (const e of entries) {
-    const proto = String(e.protocol ?? '')
-    const apr   = Number(e.apr ?? 0)
-    if (!proto || apr <= 0) continue
-
-    // Key 1: protocol + sorted tokens
-    if (Array.isArray(e.tokens) && e.tokens.length > 0) {
-      const k = proto + ':' + e.tokens.slice().sort().join('+')
-      if ((map.get(k) ?? 0) < apr) map.set(k, apr)
-    }
-
-    // Key 2: protocol + normalised label
-    const labelKey = proto + ':' + String(e.label ?? '').toLowerCase().trim()
-    if (labelKey.length > proto.length + 1 && (map.get(labelKey) ?? 0) < apr) {
-      map.set(labelKey, apr)
-    }
-
-    // Key 3: protocol fallback (highest APR for that protocol)
-    if ((map.get(proto) ?? 0) < apr) map.set(proto, apr)
-  }
-  return map
-}
-
-async function fetchMerklAprs(): Promise<AprLookup> {
-  if (merklAprCache && Date.now() - merklAprCache.ts < MERKL_TTL) {
-    return merklAprCache.map
-  }
-  try {
-    // Merkl limits to 100 items/page — fetch pages 1-3 (300 entries covers all Monad protocols)
-    const pages = await Promise.all([1, 2, 3].map(page =>
-      fetch(`${MERKL_BASE}&page=${page}`, {
-        signal: AbortSignal.timeout(12_000), cache: 'no-store',
-        headers: { 'Accept': 'application/json' },
-      }).then(r => r.ok ? r.json() : null).catch(() => null)
-    ))
-    const data: any[] = pages.flatMap(raw => {
-      if (!raw) return []
-      return Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
-    })
-    if (!data.length) return new Map()
-
-    const PROTO_MAP: Record<string, string> = {
-      curve: 'Curve', uniswap: 'Uniswap V3', pancakeswap: 'PancakeSwap V3',
-      morpho: 'Morpho', kintsu: 'Kintsu', magma: 'Magma', shmonad: 'shMonad',
-      lagoon: 'Lagoon', kuru: 'Kuru', gearbox: 'GearBox V3', curvance: 'Curvance',
-      neverland: 'Neverland', euler: 'Euler V2', upshift: 'Upshift',
-    }
-
-    const entries = data.flatMap((opp: any) => {
-      // Merkl uses mainProtocol as primary field, protocol as fallback
-      const rawProto = ((opp.mainProtocol ?? opp.protocol) ?? '').toLowerCase()
-      const proto    = PROTO_MAP[rawProto] ?? ''
-      if (!proto) return []
-      const apr = Number(opp.apr ?? 0)
-      if (apr <= 0) return []
-      // Merkl tokens array: each item has { symbol, type } — filter out gauge/reward tokens
-      const tokens: string[] = (opp.tokens ?? [])
-        .filter((t: any) => t.type === 'TOKEN' && !String(t.symbol ?? '').endsWith('-gauge'))
-        .map((t: any) => String(t.symbol ?? ''))
-        .filter(Boolean)
-      const label = String(opp.name ?? opp.identifier ?? tokens.join('/') ?? '')
-      return [{ protocol: proto, tokens, label, apr }]
-    })
-
-    const map = entriesToLookup(entries)
-    merklAprCache = { map, ts: Date.now() }
-    return map
-  } catch {
-    return new Map()
-  }
-}
-
 async function buildAprLookup(): Promise<AprLookup> {
-  // Fast path: use shared aprCache if warm (populated by best-aprs route)
-  const cached = getAprEntries()
-  if (cached) return entriesToLookup(cached)
-
-  // Cold path: fetch Merkl directly (covers most protocols)
-  return fetchMerklAprs()
+  // Ensure best-aprs data is in the shared aprCache (warms on cold start).
+  // On warm cache this returns instantly at zero cost.
+  await ensureWarm()
+  const entries = getAprEntries()
+  return entries ? entriesToLookup(entries) : new Map()
 }
 
 function lookupApr(map: AprLookup, pos: any): number {
