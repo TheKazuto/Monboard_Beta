@@ -819,38 +819,80 @@ async function fetchLagoon(user: string): Promise<any[]> {
 }
 
 // ─── KURU ─────────────────────────────────────────────────────────────────────
-const KURU_VAULTS = [
-  { address: '0x4869a4c7657cef5e5496c9ce56dde4cd593e4923', name: 'Kuru MON/AUSD', asset: 'AUSD', decimals: 6 },
-  { address: '0xd0f8a6422ccdd812f29d8fb75cf5fcd41483badc', name: 'Kuru MON/USDC', asset: 'USDC', decimals: 6 },
-]
+// Kuru vaults don't implement ERC4626 — they use a custom NAV function:
+//   0xe04d89da() → total vault value in quote token (at quote token decimals)
+// USD value = (userShares / totalSupply) × (navRaw / 10^quoteDecimals)
+//
+// Vault list is fetched dynamically from the Kuru API (api.kuru.io/api/v2/vaults)
+// so new vaults are detected automatically without code changes.
+
+const KURU_API = 'https://api.kuru.io/api/v2/vaults'
+const KURU_NAV_SEL = '0xe04d89da'  // getVaultValue() — returns NAV in quote token
 
 async function fetchKuru(user: string): Promise<any[]> {
   try {
+    // Fetch vault list from Kuru API
+    const apiRes = await fetch(KURU_API, {
+      signal: AbortSignal.timeout(8_000), cache: 'no-store',
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+    })
+    if (!apiRes.ok) return []
+    const apiData = await apiRes.json()
+    const vaults: any[] = apiData?.data?.data ?? []
+    if (!vaults.length) return []
+
+    // Build per-vault metadata
+    type VaultMeta = { address: string; name: string; base: string; quote: string; quoteDec: number }
+    const metas: VaultMeta[] = vaults.map((v: any) => ({
+      address:  (v.vaultaddress ?? '').toLowerCase(),
+      name:     `Kuru ${v.basetoken?.ticker ?? '?'}/${v.quotetoken?.ticker ?? '?'}`,
+      base:     v.basetoken?.ticker  ?? '?',
+      quote:    v.quotetoken?.ticker ?? '?',
+      quoteDec: Number(v.quotetoken?.decimal ?? 6),
+    })).filter((m: VaultMeta) => m.address)
+
+    if (!metas.length) return []
+
+    // Batch RPC: balanceOf(user), totalSupply, NAV for each vault
     const calls: any[] = []
-    KURU_VAULTS.forEach((v, i) => {
-      calls.push(ethCall(v.address, balanceOfData(user), 900 + i * 3))
-      calls.push(ethCall(v.address, '0x01e1d114', 901 + i * 3))
-      calls.push(ethCall(v.address, '0x18160ddd', 902 + i * 3))
+    metas.forEach((m, i) => {
+      calls.push(ethCall(m.address, balanceOfData(user), 900 + i * 3))
+      calls.push(ethCall(m.address, '0x18160ddd',        901 + i * 3))  // totalSupply
+      calls.push(ethCall(m.address, KURU_NAV_SEL,        902 + i * 3))  // NAV in quote token
     })
     const results = await rpcBatch(calls)
+
     const items: any[] = []
-    KURU_VAULTS.forEach((v, i) => {
-      const shares = decodeUint(results.find((r: any) => r.id === 900 + i * 3)?.result ?? '0x')
+    metas.forEach((m, i) => {
+      const shares      = decodeUint(results.find((r: any) => Number(r.id) === 900 + i * 3)?.result ?? '0x')
       if (shares === 0n) return
-      const totalAssets = decodeUint(results.find((r: any) => r.id === 901 + i * 3)?.result ?? '0x')
-      const totalSupply = decodeUint(results.find((r: any) => r.id === 902 + i * 3)?.result ?? '0x')
+      const totalSupply = decodeUint(results.find((r: any) => Number(r.id) === 901 + i * 3)?.result ?? '0x')
       if (totalSupply === 0n) return
-      const assetAmount = Number(shares * totalAssets / totalSupply) / Math.pow(10, v.decimals)
-      if (assetAmount < 0.01) return
+
+      // NAV raw is in the second 32-byte slot of the return data (offset 1)
+      // 0xe04d89da returns a struct — slot[0] is something else, slot[1] is the NAV
+      const navRaw_res = results.find((r: any) => Number(r.id) === 902 + i * 3)?.result ?? '0x'
+      const navRaw = navRaw_res && navRaw_res.length >= 130
+        ? BigInt('0x' + navRaw_res.slice(66, 130))  // slot[1]
+        : decodeUint(navRaw_res)
+
+      if (navRaw === 0n) return
+
+      // amountUSD = (userShares / totalSupply) × (navRaw / 10^quoteDec)
+      const userFrac  = Number(shares)  / Number(totalSupply)
+      const navUSD    = Number(navRaw)  / Math.pow(10, m.quoteDec)
+      const amountUSD = userFrac * navUSD
+      if (amountUSD < 0.01) return
+
       items.push({
         protocol: 'Kuru', type: 'liquidity', logo: '🌀',
-        url: `https://www.kuru.io/vaults/${v.address}`, chain: 'Monad',
-        label: v.name, tokens: ['MON', v.asset],
-        amountUSD: assetAmount, apy: 0, netValueUSD: assetAmount, inRange: null,
+        url:   `https://www.kuru.io/vaults/${m.address}`, chain: 'Monad',
+        label: m.name, tokens: [m.base, m.quote],
+        amountUSD, apy: 0, netValueUSD: amountUSD, inRange: null,
       })
     })
     return items
-  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
+  } catch (e: any) { console.error('[defi] fetchKuru error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── CURVANCE ─────────────────────────────────────────────────────────────────
