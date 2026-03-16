@@ -757,43 +757,65 @@ async function fetchShMonad(user: string, monPrice: number): Promise<any[]> {
 async function fetchLagoon(user: string): Promise<any[]> {
   const paddedAddr = user.slice(2).toLowerCase().padStart(64, '0')
   try {
-    const res = await fetch('https://app.lagoon.finance/api/vaults?chainId=143', {
-      signal: AbortSignal.timeout(8_000), cache: 'no-store',
-      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36', 'Accept': 'application/json' },
-    })
+    // Use full URL with includeApr — exposes asset.decimals and state.weeklyApr
+    const res = await fetch(
+      'https://app.lagoon.finance/api/vaults?chainId=143&underlyingassetSymbol=0&curatorId=0&pageIndex=0&pageSize=50&includeApr=true',
+      {
+        signal: AbortSignal.timeout(8_000), cache: 'no-store',
+        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36', 'Accept': 'application/json' },
+      }
+    )
     if (!res.ok) return []
     const data   = await res.json()
     const vaults: any[] = data?.vaults ?? data ?? []
     if (vaults.length === 0) return []
 
     const calls = vaults.flatMap((v: any, i: number) => [
-      ethCall(v.address, '0x70a08231' + paddedAddr, i * 3),
-      ethCall(v.address, '0x01e1d114', i * 3 + 1),
-      ethCall(v.address, '0x18160ddd', i * 3 + 2),
+      ethCall(v.address, '0x70a08231' + paddedAddr, i * 3),      // balanceOf(user) — shares (18dp)
+      ethCall(v.address, '0x01e1d114', i * 3 + 1),               // totalAssets() — in asset decimals
+      ethCall(v.address, '0x18160ddd', i * 3 + 2),               // totalSupply() — shares (18dp)
     ])
     const results = await rpcBatch(calls)
 
     const positions: any[] = []
     for (let i = 0; i < vaults.length; i++) {
       const v = vaults[i]
-      const shares      = decodeUint(results.find((r: any) => r.id === i * 3)?.result     ?? '0x')
+      const shares      = decodeUint(results.find((r: any) => Number(r.id) === i * 3)?.result     ?? '0x')
       if (shares === 0n) continue
-      const totalAssets = decodeUint(results.find((r: any) => r.id === i * 3 + 1)?.result ?? '0x')
-      const totalSupply = decodeUint(results.find((r: any) => r.id === i * 3 + 2)?.result ?? '0x')
-      const decimals    = Number(v.decimals ?? 18)
-      const shareFloat  = Number(shares) / Math.pow(10, decimals)
-      let amountUSD = 0
-      if (totalSupply > 0n) amountUSD = shareFloat * (Number(totalAssets) / Number(totalSupply))
-      if (amountUSD < 0.01 && shareFloat < 0.001) continue
+      const totalAssets = decodeUint(results.find((r: any) => Number(r.id) === i * 3 + 1)?.result ?? '0x')
+      const totalSupply = decodeUint(results.find((r: any) => Number(r.id) === i * 3 + 2)?.result ?? '0x')
+      if (totalSupply === 0n) continue
+
+      // Vault shares are always 18dp; underlying asset may have different decimals (USDC/AUSD = 6dp).
+      // Must normalise both to the same unit before dividing.
+      const shareDec  = Number(v.decimals ?? 18)                  // share token decimals (always 18)
+      const assetDec  = Number(v.asset?.decimals ?? 18)           // underlying asset decimals
+      const assetPrice = Number(v.asset?.priceUsd ?? 1)
+
+      const shareFloat   = Number(shares)      / Math.pow(10, shareDec)
+      const assetsFloat  = Number(totalAssets) / Math.pow(10, assetDec)
+      const supplyFloat  = Number(totalSupply) / Math.pow(10, shareDec)
+
+      // Price per share in asset units → multiply by asset USD price
+      const pricePerShare = assetsFloat / supplyFloat
+      const amountUSD     = shareFloat * pricePerShare * assetPrice
+      if (amountUSD < 0.01) continue
+
+      // APR from API state (already a percentage)
+      const s   = v.state ?? {}
+      const apr = s.weeklyApr?.linearNetApr ?? s.monthlyApr?.linearNetApr ?? s.inceptionApr?.linearNetApr ?? 0
+
+      const assetSymbol = v.asset?.symbol ?? v.symbol ?? 'USDC'
       positions.push({
         protocol: 'Lagoon', type: 'vault', logo: '🏝️',
         url: `https://app.lagoon.finance/vault/143/${v.address}`, chain: 'Monad',
-        label: v.name ?? v.symbol ?? 'Lagoon Vault', asset: v.symbol,
-        amountUSD, apy: v.apy ? Number(v.apy) * 100 : 0, netValueUSD: amountUSD,
+        label: v.name ?? v.symbol ?? 'Lagoon Vault', asset: assetSymbol,
+        tokens: [assetSymbol],
+        amountUSD, apy: apr, netValueUSD: amountUSD,
       })
     }
     return positions
-  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
+  } catch (e: any) { console.error('[defi] fetchLagoon error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── KURU ─────────────────────────────────────────────────────────────────────
