@@ -1069,7 +1069,7 @@ async function fetchPancakeswap(merklData: any[]): Promise<AprEntry[]> {
 }
 
 // ─── Fetch all data (used by cache) ──────────────────────────────────────────
-async function fetchAllData() {
+export async function fetchAllData() {
   // Fase 1 — dados compartilhados em paralelo (sem dependências entre si)
   const [nativeApyMap, monPrice, llamaTvls, merklData, upshiftVaults] = await Promise.all([
     fetchFloppyNativeApy(),
