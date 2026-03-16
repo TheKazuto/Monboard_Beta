@@ -946,6 +946,23 @@ async function fetchEulerV2(user: string): Promise<any[]> {
 
 type AprLookup = Map<string, number>
 
+function entriesToLookup(entries: Array<{ protocol: string; tokens: string[]; label: string; apr: number }>): AprLookup {
+  const map = new Map<string, number>()
+  for (const e of entries) {
+    const proto = String(e.protocol ?? '')
+    const apr   = Number(e.apr ?? 0)
+    if (!proto || apr <= 0) continue
+    if (Array.isArray(e.tokens) && e.tokens.length > 0) {
+      const k = proto + ':' + e.tokens.slice().sort().join('+')
+      if ((map.get(k) ?? 0) < apr) map.set(k, apr)
+    }
+    const labelKey = proto + ':' + String(e.label ?? '').toLowerCase().trim()
+    if (labelKey.length > proto.length + 1 && (map.get(labelKey) ?? 0) < apr) map.set(labelKey, apr)
+    if ((map.get(proto) ?? 0) < apr) map.set(proto, apr)
+  }
+  return map
+}
+
 const MERKL_BASE = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=100'
 const MERKL_TTL  = 3 * 60 * 1000
 
