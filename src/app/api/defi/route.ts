@@ -654,6 +654,12 @@ const UPSHIFT_API_HEADERS = {
 // Ignore Kintsu superMON vault — it's already tracked under Kintsu
 const UPSHIFT_IGNORE = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c'])
 
+// Upshift vaults use a separate ERC-20 share token (not the vault address itself).
+// The vault exposes its share token via selector 0xf5ae497a (no args → address).
+// Vaults that don't implement this selector fall back to balanceOf(vault) directly.
+// Share token addresses are resolved once per request via rpcBatch.
+const UPSHIFT_SHARE_TOKEN_SEL = '0xf5ae497a'
+
 function upshiftTokenFromName(name: string): string {
   if (/AUSD/i.test(name))       return 'AUSD'
   if (/USDC/i.test(name))       return 'USDC'
@@ -671,7 +677,7 @@ async function fetchUpshift(user: string): Promise<any[]> {
     if (!res.ok) return []
     const raw: any[] = await res.json()
 
-    // Filter: Monad chain, not test, not ignored, minimum TVL $1
+    // Filter: Monad chain, not test/bugbash, not ignored, minimum TVL $1
     const vaults = (Array.isArray(raw) ? raw : []).filter((v: any) => {
       if (v.chain !== 143) return false
       if (/test|bugbash/i.test(v.vault_name ?? '')) return false
@@ -681,8 +687,27 @@ async function fetchUpshift(user: string): Promise<any[]> {
     })
     if (!vaults.length) return []
 
-    const calls   = vaults.map((v: any, i: number) => ethCall(v.address, balanceOfData(user), i + 700))
-    const results = await rpcBatch(calls)
+    // Step 1: resolve share token address for each vault via selector 0xf5ae497a.
+    // Vaults that implement this return their separate ERC-20 share token address.
+    // Vaults that don't (different type) return 0x — fall back to vault address itself.
+    const shareTokenCalls = vaults.map((v: any, i: number) =>
+      ethCall(v.address, UPSHIFT_SHARE_TOKEN_SEL, i)
+    )
+    const shareTokenResults = await rpcBatch(shareTokenCalls)
+    const shareTokenAddrs = vaults.map((v: any, i: number) => {
+      const r   = shareTokenResults.find((x: any) => Number(x.id) === i)
+      const addr = decodeAddress(r?.result ?? '')
+      // Use share token if valid; otherwise fall back to vault address
+      return (addr && addr !== '0x0000000000000000000000000000000000000000')
+        ? addr
+        : v.address.toLowerCase()
+    })
+
+    // Step 2: balanceOf(user) on the resolved share token (or vault if no share token)
+    const balanceCalls = shareTokenAddrs.map((addr: string, i: number) =>
+      ethCall(addr, balanceOfData(user), i + 700)
+    )
+    const results = await rpcBatch(balanceCalls)
 
     const positions: any[] = []
     for (let i = 0; i < vaults.length; i++) {
@@ -690,7 +715,7 @@ async function fetchUpshift(user: string): Promise<any[]> {
       const shares = decodeUint(results.find((r: any) => Number(r.id) === i + 700)?.result ?? '0x')
       if (shares === 0n) continue
 
-      // decimals: Upshift API doesn't expose it, shares are always 18dp
+      // Share tokens always use 18 decimals
       const sharesFloat = Number(shares) / 1e18
       const ratio       = Number(v.asset_share_ratio ?? 1)
       const price       = Number(v.underlying_price ?? 0)
@@ -700,16 +725,15 @@ async function fetchUpshift(user: string): Promise<any[]> {
       const name = v.vault_name ?? ''
       const asset = upshiftTokenFromName(name)
 
-      // APY: values are decimals (e.g. 0.123 = 12.3%) — align with best-aprs logic
+      // APY: values are decimals (e.g. 0.123 = 12.3%)
       const apy7d    = v['7d_apy']  != null ? Number(v['7d_apy'])  : null
       const apy30d   = v['30d_apy'] != null ? Number(v['30d_apy']) : null
       const target   = v.target_apy != null ? Number(v.target_apy) : null
-      const MIN_HIST = 0.005  // ignore near-zero historical APY
+      const MIN_HIST = 0.005
       const bestHist = Math.max(apy7d ?? 0, apy30d ?? 0)
       const apyDec   = (bestHist >= MIN_HIST) ? bestHist
         : (target != null && target > 0) ? target
         : 0
-      // Convert decimal APY to APR % (compound → simple)
       const apy = apyDec > 0 ? (Math.pow(1 + apyDec, 1/365) - 1) * 365 * 100 : 0
 
       positions.push({
