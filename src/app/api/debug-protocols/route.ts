@@ -24,12 +24,18 @@ export async function GET(req: NextRequest) {
   try {
     const res = await fetch(MERKL_API, {
       signal: AbortSignal.timeout(10_000), cache: 'no-store',
+      headers: { 'Accept': 'application/json' },
     })
     trace.merkl_status = res.status
     trace.merkl_ok     = res.ok
-    if (!res.ok) return NextResponse.json({ ...trace, error: 'Merkl fetch failed' })
-    rawData = await res.json()
-    trace.merkl_total_entries = Array.isArray(rawData) ? rawData.length : 'NOT_ARRAY'
+    if (!res.ok) {
+      trace.merkl_body = await res.text().catch(() => '')
+      return NextResponse.json({ ...trace, error: 'Merkl fetch failed' })
+    }
+    const raw = await res.json()
+    rawData = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
+    trace.merkl_total_entries = rawData.length
+    trace.merkl_raw_type = Array.isArray(raw) ? 'array' : typeof raw
   } catch (e: any) {
     trace.merkl_error = e?.message ?? String(e)
     return NextResponse.json(trace)
