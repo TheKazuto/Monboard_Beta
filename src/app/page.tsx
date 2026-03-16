@@ -336,8 +336,9 @@ export default function LandingPage() {
         {/* ── Fixed Header ── */}
         <header className="land-header">
           <a href="/landing" className="land-logo">
-            <div className="land-logo-dot">M</div>
-            Mon<span style={{ color: '#836EF9' }}>Board</span>
+            <div className="land-logo-dot" style={{ padding: 0, overflow: 'hidden' }}>
+              <img src="/monboard.png" alt="MonBoard" width={32} height={32} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            </div>Mon<span style={{ color: '#836EF9' }}>Board</span>
           </a>
           <Link href="/dashboard" className="btn-launch">
             Launch Dashboard <span>→</span>
@@ -366,7 +367,7 @@ export default function LandingPage() {
             </h1>
 
             <p className="reveal d3" style={{ fontSize: 'clamp(1rem, 2.5vw, 1.2rem)', color: 'var(--land-muted)', lineHeight: 1.7, maxWidth: '580px', margin: '0 auto 2.5rem' }}>
-              Track tokens, DeFi positions, NFTs and transaction history across the entire Monad ecosystem — in one clean, real-time dashboard.
+              Track tokens, DeFi positions, NFTs and transaction history across the entire Monad ecosystem — in one clean, real-time dashboard. Free forever.
             </p>
 
             <div className="reveal d4" style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -481,7 +482,7 @@ export default function LandingPage() {
                 'Cross-chain swaps built in',
                 'Security scanner for approvals',
                 'Portfolio history up to 1 year',
-                'Everything you need on Web3 in one place',
+                'Fully free, no wallet required to browse',
                 'Dark mode & mobile responsive',
               ].map(item => (
                 <div key={item} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', padding: '0.75rem 1rem', background: 'var(--land-card)', borderRadius: '10px', border: '1px solid var(--land-border)' }}>
@@ -505,7 +506,7 @@ export default function LandingPage() {
             Start tracking your Monad portfolio today
           </h2>
           <p style={{ color: 'var(--land-muted)', marginBottom: '2.5rem', fontSize: '1rem' }}>
-            No sign-up. Just connect your wallet.
+            Free forever. No sign-up. Just connect your wallet.
           </p>
           <Link href="/dashboard" className="btn-launch btn-launch-lg">
             Launch Dashboard →
