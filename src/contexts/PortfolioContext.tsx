@@ -299,7 +299,24 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       return
     }
 
-    // Connected — debounce slightly to absorb wagmi reconnect flicker
+    const key = address.toLowerCase()
+
+    // ── Immediate cache restore (zero delay) ──────────────────────────────
+    // When React re-renders after navigation, state resets to ZERO.
+    // Restore from portfolioCache synchronously — before the debounce fires —
+    // so positions are shown immediately without a 200ms blank flash.
+    const existing = portfolioCache.get(key)
+    if (existing) {
+      setTotals(existing.totals)
+      setStatus(Date.now() - existing.fetchedAt < CACHE_TTL_MS ? 'done' : 'loading')
+      if (existing.totals.defiPositions.length > 0) {
+        defiLoadedRef.current = key
+      }
+      // If cache is still fresh, no need to re-fetch — bail early
+      if (Date.now() - existing.fetchedAt < CACHE_TTL_MS) return
+    }
+
+    // ── Debounced load (absorbs wagmi reconnect flicker) ──────────────────
     const timer = setTimeout(() => load(address), 200)
     return () => clearTimeout(timer)
   }, [address, isConnected, load])
