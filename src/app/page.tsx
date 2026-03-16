@@ -366,7 +366,7 @@ export default function LandingPage() {
             </h1>
 
             <p className="reveal d3" style={{ fontSize: 'clamp(1rem, 2.5vw, 1.2rem)', color: 'var(--land-muted)', lineHeight: 1.7, maxWidth: '580px', margin: '0 auto 2.5rem' }}>
-              Track tokens, DeFi positions, NFTs and transaction history across the entire Monad ecosystem — in one clean, real-time dashboard. Free forever.
+              Track tokens, DeFi positions, NFTs and transaction history across the entire Monad ecosystem — in one clean, real-time dashboard.
             </p>
 
             <div className="reveal d4" style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -380,7 +380,7 @@ export default function LandingPage() {
 
             {/* Hero mini-stat strip */}
             <div className="reveal d5" style={{ marginTop: '4rem', display: 'flex', justifyContent: 'center', gap: '2.5rem', flexWrap: 'wrap', opacity: 0.6, fontSize: '0.85rem' }}>
-              {['14+ protocols', '10+ features', 'Free to use', 'Live data'].map(s => (
+              {['14+ protocols', '10+ features', 'Practical to use', 'Live data'].map(s => (
                 <span key={s} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                   <span style={{ color: '#836EF9', fontSize: '1rem' }}>✦</span> {s}
                 </span>
@@ -481,7 +481,7 @@ export default function LandingPage() {
                 'Cross-chain swaps built in',
                 'Security scanner for approvals',
                 'Portfolio history up to 1 year',
-                'Fully free, no wallet required to browse',
+                'Everything you need on Web3 in one place',
                 'Dark mode & mobile responsive',
               ].map(item => (
                 <div key={item} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', padding: '0.75rem 1rem', background: 'var(--land-card)', borderRadius: '10px', border: '1px solid var(--land-border)' }}>
@@ -505,7 +505,7 @@ export default function LandingPage() {
             Start tracking your Monad portfolio today
           </h2>
           <p style={{ color: 'var(--land-muted)', marginBottom: '2.5rem', fontSize: '1rem' }}>
-            Free forever. No sign-up. Just connect your wallet.
+            No sign-up. Just connect your wallet.
           </p>
           <Link href="/dashboard" className="btn-launch btn-launch-lg">
             Launch Dashboard →
