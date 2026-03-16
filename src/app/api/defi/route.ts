@@ -829,27 +829,40 @@ async function fetchLagoon(user: string): Promise<any[]> {
 const KURU_API = 'https://api.kuru.io/api/v2/vaults'
 const KURU_NAV_SEL = '0xe04d89da'  // getVaultValue() — returns NAV in quote token
 
+// Known vaults not yet indexed by the Kuru API
+// Add new ones here if they appear in user deposits before the API includes them
+const KURU_LEGACY_VAULTS = [
+  { address: '0x4869a4c7657cef5e5496c9ce56dde4cd593e4923', name: 'Kuru MON/AUSD', base: 'MON', quote: 'AUSD', quoteDec: 6 },
+  { address: '0xd0f8a6422ccdd812f29d8fb75cf5fcd41483badc', name: 'Kuru MON/USDC', base: 'MON', quote: 'USDC', quoteDec: 6 },
+]
+
 async function fetchKuru(user: string): Promise<any[]> {
   try {
-    // Fetch vault list from Kuru API
-    const apiRes = await fetch(KURU_API, {
-      signal: AbortSignal.timeout(8_000), cache: 'no-store',
-      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
-    })
-    if (!apiRes.ok) return []
-    const apiData = await apiRes.json()
-    const vaults: any[] = apiData?.data?.data ?? []
-    if (!vaults.length) return []
-
-    // Build per-vault metadata
+    // Fetch vault list from Kuru API — fails gracefully, falls back to legacy list
     type VaultMeta = { address: string; name: string; base: string; quote: string; quoteDec: number }
-    const metas: VaultMeta[] = vaults.map((v: any) => ({
-      address:  (v.vaultaddress ?? '').toLowerCase(),
-      name:     `Kuru ${v.basetoken?.ticker ?? '?'}/${v.quotetoken?.ticker ?? '?'}`,
-      base:     v.basetoken?.ticker  ?? '?',
-      quote:    v.quotetoken?.ticker ?? '?',
-      quoteDec: Number(v.quotetoken?.decimal ?? 6),
-    })).filter((m: VaultMeta) => m.address)
+
+    let apiMetas: VaultMeta[] = []
+    try {
+      const apiRes = await fetch(KURU_API, {
+        signal: AbortSignal.timeout(8_000), cache: 'no-store',
+        headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+      })
+      if (apiRes.ok) {
+        const apiData = await apiRes.json()
+        apiMetas = (apiData?.data?.data ?? []).map((v: any) => ({
+          address:  (v.vaultaddress ?? '').toLowerCase(),
+          name:     `Kuru ${v.basetoken?.ticker ?? '?'}/${v.quotetoken?.ticker ?? '?'}`,
+          base:     v.basetoken?.ticker  ?? '?',
+          quote:    v.quotetoken?.ticker ?? '?',
+          quoteDec: Number(v.quotetoken?.decimal ?? 6),
+        })).filter((m: VaultMeta) => m.address)
+      }
+    } catch { /* API unavailable — use legacy list only */ }
+
+    // Merge API list with legacy vaults (deduplicate by address)
+    const seen = new Set(apiMetas.map((m: VaultMeta) => m.address))
+    const legacyExtra = KURU_LEGACY_VAULTS.filter(v => !seen.has(v.address.toLowerCase()))
+    const metas: VaultMeta[] = [...apiMetas, ...legacyExtra]
 
     if (!metas.length) return []
 
