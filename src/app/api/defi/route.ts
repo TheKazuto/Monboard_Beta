@@ -365,10 +365,17 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
       tokenAddresses.add(token1.toLowerCase())
       parsedPositions.push({ token0, token1, fee, tickLower, tickUpper, liquidity })
     }
+    console.error('[defi][' + protocol + '] parsedPositions:', parsedPositions.length, 'tokenAddresses:', [...tokenAddresses])
     if (!parsedPositions.length) return []
 
     // Resolve simbolos/decimals de todos os tokens em batch (com cache)
-    const tokenInfoMap = await resolveTokens([...tokenAddresses])
+    let tokenInfoMap: Record<string, any> = {}
+    try {
+      tokenInfoMap = await resolveTokens([...tokenAddresses])
+      console.error('[defi][' + protocol + '] tokenInfoMap:', JSON.stringify(tokenInfoMap))
+    } catch (e: any) {
+      console.error('[defi][' + protocol + '] resolveTokens ERROR:', e?.message ?? e)
+    }
 
     const poolCalls: object[] = []
     const poolMeta: Record<number, any> = {}
@@ -379,10 +386,12 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
       const t1 = tokenInfoMap[pos.token1.toLowerCase()] ?? { symbol: pos.token1.slice(2, 8).toUpperCase(), decimals: 18 }
       poolCalls.push(ethCall(factory, getPoolData(pos.token0, pos.token1, pos.fee), pcIdx))
       poolMeta[pcIdx] = { ...pos, t0sym: t0.symbol, t1sym: t1.symbol, t0dec: t0.decimals, t1dec: t1.decimals }
+      console.error('[defi][' + protocol + '] poolMeta[' + pcIdx + ']:', t0.symbol, '/', t1.symbol)
       pcIdx++
     }
 
     const poolAddrResults = await rpcBatch(poolCalls)
+    console.error('[defi][' + protocol + '] poolAddrResults:', poolAddrResults.map((r: any) => ({ id: r.id, addr: r.result ? r.result.slice(-40) : 'NULL', error: r.error })))
 
     const slot0Calls: object[] = []
     const slot0Meta: Record<number, any> = {}
@@ -390,23 +399,28 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
 
     for (const res of poolAddrResults) {
       const meta = poolMeta[res.id]
-      if (!meta || !res.result || res.result === '0x') continue
+      if (!meta) { console.error('[defi][' + protocol + '] poolMeta miss id:', res.id, 'keys:', Object.keys(poolMeta)); continue }
+      if (!res.result || res.result === '0x') { console.error('[defi][' + protocol + '] empty pool result for id:', res.id); continue }
       const poolAddr = decodeAddress(res.result)
-      if (poolAddr === '0x0000000000000000000000000000000000000000') continue
+      if (poolAddr === '0x0000000000000000000000000000000000000000') { console.error('[defi][' + protocol + '] zero pool addr'); continue }
       slot0Calls.push(ethCall(poolAddr, '0x3850c7bd', s0Idx))
       slot0Meta[s0Idx] = meta
       s0Idx++
     }
+    console.error('[defi][' + protocol + '] slot0Calls count:', slot0Calls.length)
     if (!slot0Calls.length) return []
     const slot0Results = await rpcBatch(slot0Calls)
+    console.error('[defi][' + protocol + '] slot0Results:', slot0Results.map((r: any) => ({ id: r.id, len: r.result?.length, error: r.error })))
 
     const allSymbols = [...new Set(Object.values(slot0Meta).flatMap((m: any) => [m.t0sym, m.t1sym]))]
     const prices     = await getTokenPricesUSD(allSymbols)
+    console.error('[defi][' + protocol + '] prices:', JSON.stringify(prices))
 
     const positions: any[] = []
     for (const s0 of slot0Results) {
       const meta = slot0Meta[s0.id]
-      if (!meta || !s0.result || s0.result === '0x' || s0.result.length < 10) continue
+      if (!meta) { console.error('[defi][' + protocol + '] slot0Meta miss id:', s0.id); continue }
+      if (!s0.result || s0.result === '0x' || s0.result.length < 10) { console.error('[defi][' + protocol + '] bad slot0 result len:', s0.result?.length); continue }
       const d  = s0.result.slice(2)
       const w  = Array.from({ length: 4 }, (_, j) => d.slice(j * 64, (j + 1) * 64))
       const ct = parseInt(w[1], 16)
