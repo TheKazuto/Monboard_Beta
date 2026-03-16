@@ -855,8 +855,8 @@ async function fetchKuru(user: string): Promise<any[]> {
       })
       if (apiRes.ok) {
         const apiData = await apiRes.json()
-        // v3 API shape: { data: [...] } — field names use camelCase
-        const vaultList = apiData?.data ?? apiData?.data?.data ?? []
+        // v3 API shape: { data: { data: [...], pagination: {...} } }
+        const vaultList = apiData?.data?.data ?? apiData?.data ?? []
         apiMetas = (Array.isArray(vaultList) ? vaultList : []).map((v: any) => ({
           address:  (v.vaultAddress ?? v.vaultaddress ?? '').toLowerCase(),
           name:     `Kuru ${v.baseToken?.ticker ?? v.basetoken?.ticker ?? '?'}/${v.quoteToken?.ticker ?? v.quotetoken?.ticker ?? '?'}`,
