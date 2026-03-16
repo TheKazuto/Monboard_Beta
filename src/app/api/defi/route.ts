@@ -883,19 +883,21 @@ async function fetchEulerV2(user: string): Promise<any[]> {
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 // ─── UNIFIED APR INJECTION ───────────────────────────────────────────────────
-// Reads from shared aprCache (populated by best-aprs/route.ts) — no HTTP call.
-// Matching order:
-//   1. protocol + sorted tokens  (most precise — pool positions)
-//   2. protocol + asset/label    (vault/lend positions)
-//   3. protocol only             (fallback — highest APR for that protocol)
+// Builds a protocol+tokens → APR lookup map.
+// Sources (in order of preference):
+//   1. aprCache populated by best-aprs/route.ts (zero-latency when warm)
+//   2. Direct Merkl API fetch when cache is cold (first visit to /defi)
 
 type AprLookup = Map<string, number>
 
-function buildAprLookup(): AprLookup {
-  const map  = new Map<string, number>()
-  const entries = getAprEntries()
-  if (!entries) return map  // cache not yet warm — positions still show with apy=0
+const MERKL_API = 'https://api.merkl.xyz/v4/opportunities?chainId=10143&status=LIVE&items=200'
 
+// Module-level Merkl cache — avoid re-fetching within same Worker lifetime
+let merklAprCache: { map: AprLookup; ts: number } | null = null
+const MERKL_TTL = 3 * 60 * 1000
+
+function entriesToLookup(entries: Array<{ protocol: string; tokens: string[]; label: string; apr: number }>): AprLookup {
+  const map = new Map<string, number>()
   for (const e of entries) {
     const proto = String(e.protocol ?? '')
     const apr   = Number(e.apr ?? 0)
@@ -913,10 +915,60 @@ function buildAprLookup(): AprLookup {
       map.set(labelKey, apr)
     }
 
-    // Key 3: protocol fallback
+    // Key 3: protocol fallback (highest APR for that protocol)
     if ((map.get(proto) ?? 0) < apr) map.set(proto, apr)
   }
   return map
+}
+
+async function fetchMerklAprs(): Promise<AprLookup> {
+  if (merklAprCache && Date.now() - merklAprCache.ts < MERKL_TTL) {
+    return merklAprCache.map
+  }
+  try {
+    const res = await fetch(MERKL_API, {
+      signal: AbortSignal.timeout(8_000), cache: 'no-store',
+    })
+    if (!res.ok) return new Map()
+    const data: any[] = await res.json()
+    if (!Array.isArray(data)) return new Map()
+
+    const PROTO_MAP: Record<string, string> = {
+      curve: 'Curve', uniswap: 'Uniswap V3', pancakeswap: 'PancakeSwap V3',
+      morpho: 'Morpho', kintsu: 'Kintsu', magma: 'Magma', shmonad: 'shMonad',
+      lagoon: 'Lagoon', kuru: 'Kuru', gearbox: 'GearBox V3', curvance: 'Curvance',
+      neverland: 'Neverland', euler: 'Euler V2', upshift: 'Upshift',
+    }
+
+    const entries = data.flatMap((opp: any) => {
+      const rawProto = (opp.protocol ?? opp.mainProtocol ?? '').toLowerCase()
+      const proto    = PROTO_MAP[rawProto] ?? ''
+      if (!proto) return []
+      const apr   = Number(opp.apr ?? 0)
+      if (apr <= 0) return []
+      const tokens: string[] = (opp.tokens ?? [])
+        .filter((t: any) => t.type === 'TOKEN')
+        .map((t: any) => String(t.symbol ?? ''))
+        .filter(Boolean)
+      const label = String(opp.name ?? tokens.join('/') ?? '')
+      return [{ protocol: proto, tokens, label, apr }]
+    })
+
+    const map = entriesToLookup(entries)
+    merklAprCache = { map, ts: Date.now() }
+    return map
+  } catch {
+    return new Map()
+  }
+}
+
+async function buildAprLookup(): Promise<AprLookup> {
+  // Fast path: use shared aprCache if warm (populated by best-aprs route)
+  const cached = getAprEntries()
+  if (cached) return entriesToLookup(cached)
+
+  // Cold path: fetch Merkl directly (covers most protocols)
+  return fetchMerklAprs()
 }
 
 function lookupApr(map: AprLookup, pos: any): number {
@@ -1023,9 +1075,8 @@ export async function GET(req: NextRequest) {
     ...unwrap(lagoonR), ...unwrap(kuruR), ...unwrap(curvanceR), ...unwrap(eulerR),
   ]
 
-  // Inject APRs from shared aprCache — synchronous, no HTTP, zero latency
-  // Cache is populated by best-aprs/route.ts on first best-aprs call
-  const bestAprsMap = buildAprLookup()
+  // Inject APRs: uses aprCache if warm, falls back to direct Merkl fetch
+  const bestAprsMap = await buildAprLookup()
   allPositions = injectBestAprs(allPositions, bestAprsMap)
 
   // Pos-processamento: Gearbox WMON precisa do preco do MON
