@@ -54,6 +54,7 @@ interface PortfolioContextValue {
   status:      LoadStatus
   lastUpdated: Date | null
   refresh:     () => void
+  defiLoaded:  boolean  // true once defi positions have loaded at least once for current address
 }
 
 const ZERO: PortfolioTotals = {
@@ -82,10 +83,11 @@ interface CacheEntry {
 const portfolioCache = new Map<string, CacheEntry>()
 
 const PortfolioCtx = createContext<PortfolioContextValue>({
-  totals:      ZERO,
-  status:      'idle',
-  lastUpdated: null,
-  refresh:     () => {},
+  totals:        ZERO,
+  status:        'idle',
+  lastUpdated:   null,
+  refresh:       () => {},
+  defiLoaded:    false,
 })
 
 export function usePortfolio() {
@@ -109,6 +111,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   const nftsNoKeyRef  = useRef(false)
   const loadingAddr   = useRef<string | null>(null)
   const lastAddr      = useRef<string | null>(null)  // track last loaded address
+  const defiLoadedRef = useRef<string | null>(null)  // address for which defi has loaded
 
   const flush = useCallback((addr: string, final = false) => {
     const key = addr.toLowerCase()
@@ -226,10 +229,9 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
 
     const fetchDefi = async () => {
       try {
-        // Force fresh fetch — bypass dataCache to avoid serving stale empty positions
-        const res  = await fetch(`/api/defi?address=${encodeURIComponent(addr)}`)
-        if (!res.ok) return
-        const data = await res.json()
+        // Use cachedFetch — safePositions guard in flush() prevents empty cache overwrites.
+        // This ensures positions are shown instantly on navigation (from dataCache).
+        const data = await cachedFetch<any>('/api/defi', addr)
         if (loadingAddr.current !== key) return
         const s    = data.summary ?? {}
         defiRef.current = {
@@ -239,6 +241,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
           defiActiveProtocols: Array.isArray(s.activeProtocols) ? s.activeProtocols : [],
           defiPositions:       Array.isArray(data.positions) ? data.positions : [],
         }
+        defiLoadedRef.current = key  // mark defi as loaded for this address
         flush(addr)
         setStatus(s2 => s2 === 'loading' ? 'partial' : s2)
       } catch { /* keeps previous value */ }
@@ -300,8 +303,10 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     }
   }, [address, isConnected, load])
 
+  const defiLoaded = defiLoadedRef.current === (address?.toLowerCase() ?? null)
+
   return (
-    <PortfolioCtx.Provider value={{ totals, status, lastUpdated, refresh }}>
+    <PortfolioCtx.Provider value={{ totals, status, lastUpdated, refresh, defiLoaded }}>
       {children}
     </PortfolioCtx.Provider>
   )
