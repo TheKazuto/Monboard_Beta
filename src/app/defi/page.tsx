@@ -365,10 +365,10 @@ function ProtocolsList({ textColor = 'text-gray-500', justify = '' }: { textColo
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function DefiPage() {
   const { isConnected }                          = useWallet()
-  const { totals, status, lastUpdated, refresh } = usePortfolio()
+  const { totals, status, lastUpdated, refresh, defiLoaded } = usePortfolio()
 
-  const isLoading  = status === 'loading'
-  const hasData    = status === 'partial' || status === 'done'
+  const isLoading  = status === 'loading' || (status === 'partial' && !defiLoaded)
+  const hasData    = defiLoaded || status === 'done'
   const isError    = status === 'error'
   const positions  = totals.defiPositions
   const lending    = positions.filter((p: any) => p.type === 'lending')
@@ -445,7 +445,7 @@ export default function DefiPage() {
       )}
 
       {/* ── Empty state ── */}
-      {isConnected && !isLoading && positions.length === 0 && (
+      {isConnected && !isLoading && defiLoaded && positions.length === 0 && (
         <div className="card p-10 text-center">
           <div className="text-4xl mb-3">🌐</div>
           <h2 className="text-base font-bold text-gray-800 mb-1">No positions found</h2>
