@@ -234,32 +234,42 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     }
   }, [flush])
 
-  // Debounce address changes to avoid wagmi flicker on navigation
+  // Navigation guard — prevents positions from disappearing when wagmi briefly
+  // loses connection during page navigation (~100-300ms flicker).
+  // Strategy: use a ref to track the last known good address and restore from
+  // cache immediately instead of resetting to ZERO.
+  const stableAddrRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    // When address is available, always keep stableAddrRef up to date
+    if (address) stableAddrRef.current = address.toLowerCase()
+  }, [address])
+
   useEffect(() => {
     if (!isConnected || !address) {
-      // During navigation wagmi briefly loses connection (~100-300ms).
-      // If we have cached data, immediately restore it so UI never goes blank.
-      // Only reset to ZERO if there is truly no data and no fetch in progress.
-      const addrToCheck = address ?? lastAddr.current
-      const cached      = addrToCheck ? portfolioCache.get(addrToCheck.toLowerCase()) : null
-      const isMidFetch  = loadingAddr.current !== null
-
-      if (cached) {
-        // Restore from cache immediately — user will see stale data during reconnect
-        setTotals(cached.totals)
-        setStatus('done')
-      } else if (!isMidFetch) {
-        setTotals(ZERO)
-        setStatus('idle')
-        setLastUpdated(null)
+      // Wagmi temporarily lost connection (navigation flicker).
+      // Find the last known address — prefer stableAddrRef over lastAddr
+      const knownAddr = stableAddrRef.current ?? lastAddr.current
+      if (knownAddr) {
+        const cached = portfolioCache.get(knownAddr)
+        if (cached) {
+          // Restore cached state immediately so UI never goes blank
+          setTotals(cached.totals)
+          setStatus('done')
+          return
+        }
+        // Has an address but no cache yet and already loading — just wait
+        if (loadingAddr.current !== null) return
       }
+      // Genuinely disconnected with no data — reset
+      setTotals(ZERO)
+      setStatus('idle')
+      setLastUpdated(null)
       return
     }
 
-    const timer = setTimeout(() => {
-      load(address)
-    }, 300) // 300ms debounce — gives wagmi enough time to reconnect after navigation
-
+    // Connected — debounce slightly to absorb wagmi reconnect flicker
+    const timer = setTimeout(() => load(address), 200)
     return () => clearTimeout(timer)
   }, [address, isConnected, load])
 
