@@ -544,6 +544,7 @@ async function fetchCurve(user: string): Promise<any[]> {
 
 // ─── GEARBOX ──────────────────────────────────────────────────────────────────
 const GEARBOX_STATIC_URL = 'https://state-cache.gearbox.foundation/Monad.json'
+const GEARBOX_APY_URL    = 'https://state-cache.gearbox.foundation/apy-server/latest.json'
 
 const GEARBOX_TOKEN_MAP: Record<string, { token: string; isStable: boolean }> = {
   '0x34752948b0dc28969485df2066ffe86d5dc36689': { token: 'WMON', isStable: false },
@@ -553,9 +554,54 @@ const GEARBOX_TOKEN_MAP: Record<string, { token: string; isStable: boolean }> = 
   '0x164a35f31e4e0f6c45d500962a6978d2cbd5a16b': { token: 'USDT', isStable: true  },
 }
 
+async function fetchGearboxAprs(): Promise<Map<string, number>> {
+  const map = new Map<string, number>()
+  try {
+    const [staticRes, apyRes] = await Promise.all([
+      fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
+      fetch(GEARBOX_APY_URL,    { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
+    ])
+
+    // Extra APY (rewards) per pool address
+    const extraApyMap = new Map<string, number>()
+    if (apyRes.ok) {
+      const apyData = await apyRes.json()
+      const pools: any[] = apyData?.chains?.['143']?.pools?.data ?? []
+      const now = Math.floor(Date.now() / 1000)
+      for (const entry of pools) {
+        const addr  = (entry?.pool ?? '').toLowerCase()
+        const extra = (entry?.rewards?.extraAPY ?? [])
+          .filter((e: any) => !e.endTimestamp || e.endTimestamp > now)
+          .reduce((sum: number, e: any) => sum + (Number(e.apy) || 0), 0)
+        if (extra > 0) extraApyMap.set(addr, extra)
+      }
+    }
+
+    if (!staticRes.ok) return map
+    const data     = await staticRes.json()
+    const markets: any[] = data?.markets ?? []
+
+    for (const m of markets) {
+      const pool = m?.pool
+      if (!pool || pool.isPaused) continue
+      const addr       = (pool?.baseParams?.addr ?? '').toLowerCase()
+      const supplyRay  = BigInt(pool?.supplyRate?.__value ?? '0')
+      if (supplyRay === 0n) continue
+      const baseApr  = Number(supplyRay) / 1e27 * 100
+      if (baseApr <= 0 || baseApr > 500) continue
+      const totalApr = baseApr + (extraApyMap.get(addr) ?? 0)
+      map.set(addr, totalApr)
+    }
+  } catch { /* APR stays 0 */ }
+  return map
+}
+
 async function fetchGearbox(user: string): Promise<any[]> {
   try {
-    const res  = await fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
+    const [res, aprMap] = await Promise.all([
+      fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
+      fetchGearboxAprs(),
+    ])
     if (!res.ok) return []
     const data = await res.json()
     const markets: any[] = data?.markets ?? []
@@ -584,11 +630,12 @@ async function fetchGearbox(user: string): Promise<any[]> {
       const totalSupply  = BigInt(pool.totalSupply?.__value ?? pool.totalSupply ?? '0')
       let amountUSD = 0
       if (totalSupply > 0n) amountUSD = meta.isStable ? sharesFloat * (Number(expectedLiq) / Number(totalSupply)) : 0
+      const poolApr = aprMap.get((pool?.baseParams?.addr ?? '').toLowerCase()) ?? 0
       positions.push({
         protocol: 'GearBox V3', type: 'vault', logo: '⚙️',
         url: 'https://app.gearbox.fi/pools?chainId=143', chain: 'Monad',
         label: pool.name ?? meta.token, asset: meta.token,
-        shares: sharesFloat, amountUSD, apy: 0, netValueUSD: amountUSD,
+        shares: sharesFloat, amountUSD, apy: poolApr, netValueUSD: amountUSD,
         _needsMonPrice: !meta.isStable,
         // Exchange rate: expectedLiq/totalSupply (both in same raw units — no decimals division needed here)
         // sharesFloat already accounts for decimals; multiplying by this rate gives MON amount
