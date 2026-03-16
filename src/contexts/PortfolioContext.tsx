@@ -237,12 +237,13 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   // Debounce address changes to avoid wagmi flicker on navigation
   useEffect(() => {
     if (!isConnected || !address) {
-      // During navigation, wagmi briefly loses connection.
-      // Check cache for current OR last-known address to avoid flicker.
+      // During navigation wagmi briefly loses connection (~100-300ms).
+      // Only reset if there is no cached data AND we are not mid-fetch.
+      // This prevents the DeFi positions from disappearing on page navigation.
       const addrToCheck = address ?? lastAddr.current
-      const hasCached = addrToCheck && portfolioCache.has(addrToCheck.toLowerCase())
-      if (!hasCached) {
-        loadingAddr.current = null
+      const hasCached   = addrToCheck && portfolioCache.has(addrToCheck.toLowerCase())
+      const isMidFetch  = loadingAddr.current !== null
+      if (!hasCached && !isMidFetch) {
         setTotals(ZERO)
         setStatus('idle')
         setLastUpdated(null)
@@ -252,7 +253,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
 
     const timer = setTimeout(() => {
       load(address)
-    }, 100) // 100ms debounce — absorbs wagmi reconnect flicker
+    }, 300) // 300ms debounce — gives wagmi enough time to reconnect after navigation
 
     return () => clearTimeout(timer)
   }, [address, isConnected, load])
