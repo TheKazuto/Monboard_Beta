@@ -651,17 +651,34 @@ const UPSHIFT_API_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Accept': 'application/json',
 }
+// Ignore Kintsu superMON vault — it's already tracked under Kintsu
+const UPSHIFT_IGNORE = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c'])
+
+function upshiftTokenFromName(name: string): string {
+  if (/AUSD/i.test(name))       return 'AUSD'
+  if (/USDC/i.test(name))       return 'USDC'
+  if (/USDT/i.test(name))       return 'USDT'
+  if (/BTC|wBTC/i.test(name))  return 'WBTC'
+  if (/MON/i.test(name))        return 'MON'
+  return '?'
+}
 
 async function fetchUpshift(user: string): Promise<any[]> {
   try {
     const res = await fetch('https://api.upshift.finance/metrics/vaults_summary', {
-      headers: UPSHIFT_API_HEADERS, signal: AbortSignal.timeout(8_000), cache: 'no-store',
+      headers: UPSHIFT_API_HEADERS, signal: AbortSignal.timeout(10_000), cache: 'no-store',
     })
     if (!res.ok) return []
     const raw: any[] = await res.json()
-    const vaults = (Array.isArray(raw) ? raw : []).filter(
-      (v: any) => v.chain === 143 && !/test|bugbash/i.test(v.vault_name ?? '') && Number(v.total_assets ?? 0) > 0.001
-    )
+
+    // Filter: Monad chain, not test, not ignored, minimum TVL $1
+    const vaults = (Array.isArray(raw) ? raw : []).filter((v: any) => {
+      if (v.chain !== 143) return false
+      if (/test|bugbash/i.test(v.vault_name ?? '')) return false
+      if (UPSHIFT_IGNORE.has((v.address ?? '').toLowerCase())) return false
+      const tvl = Number(v.total_assets ?? 0) * Number(v.underlying_price ?? 0)
+      return tvl >= 1
+    })
     if (!vaults.length) return []
 
     const calls   = vaults.map((v: any, i: number) => ethCall(v.address, balanceOfData(user), i + 700))
@@ -670,29 +687,39 @@ async function fetchUpshift(user: string): Promise<any[]> {
     const positions: any[] = []
     for (let i = 0; i < vaults.length; i++) {
       const v      = vaults[i]
-      const shares = decodeUint(results.find((r: any) => r.id === i + 700)?.result ?? '0x')
+      const shares = decodeUint(results.find((r: any) => Number(r.id) === i + 700)?.result ?? '0x')
       if (shares === 0n) continue
-      const decimals    = Number(v.decimals ?? 18)
-      const sharesFloat = Number(shares) / Math.pow(10, decimals)
+
+      // decimals: Upshift API doesn't expose it, shares are always 18dp
+      const sharesFloat = Number(shares) / 1e18
       const ratio       = Number(v.asset_share_ratio ?? 1)
-      const underlying  = sharesFloat * ratio
       const price       = Number(v.underlying_price ?? 0)
-      const amountUSD   = underlying * price
-      if (sharesFloat < 0.001 && amountUSD < 0.01) continue
+      const amountUSD   = sharesFloat * ratio * price
+      if (amountUSD < 0.01) continue
+
       const name = v.vault_name ?? ''
-      const asset = name.includes('MON') ? 'MON' : name.includes('AUSD') ? 'AUSD'
-        : name.includes('USDC') ? 'USDC' : name.includes('BTC') ? 'WBTC' : 'unknown'
-      const apy7d  = Number(v['7d_apy'] ?? 0)
-      const apy30d = Number(v['30d_apy'] ?? 0)
-      const apy    = (apy7d > 0 ? apy7d : apy30d) * 100
+      const asset = upshiftTokenFromName(name)
+
+      // APY: values are decimals (e.g. 0.123 = 12.3%) — align with best-aprs logic
+      const apy7d    = v['7d_apy']  != null ? Number(v['7d_apy'])  : null
+      const apy30d   = v['30d_apy'] != null ? Number(v['30d_apy']) : null
+      const target   = v.target_apy != null ? Number(v.target_apy) : null
+      const MIN_HIST = 0.005  // ignore near-zero historical APY
+      const bestHist = Math.max(apy7d ?? 0, apy30d ?? 0)
+      const apyDec   = (bestHist >= MIN_HIST) ? bestHist
+        : (target != null && target > 0) ? target
+        : 0
+      // Convert decimal APY to APR % (compound → simple)
+      const apy = apyDec > 0 ? (Math.pow(1 + apyDec, 1/365) - 1) * 365 * 100 : 0
+
       positions.push({
         protocol: 'Upshift', type: 'vault', logo: '🔺',
-        url: 'https://app.upshift.finance', chain: 'Monad',
+        url: `https://app.upshift.finance/vaults/${v.address}`, chain: 'Monad',
         label: name, asset, amount: sharesFloat, amountUSD, apy, netValueUSD: amountUSD,
       })
     }
     return positions
-  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
+  } catch (e: any) { console.error('[defi] fetchUpshift error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── KINTSU (sMON LST) ────────────────────────────────────────────────────────
