@@ -576,7 +576,7 @@ async function fetchGearbox(user: string): Promise<any[]> {
       const addr  = (pool?.baseParams?.addr ?? '').toLowerCase()
       const meta  = GEARBOX_TOKEN_MAP[addr]
       if (!meta) continue
-      const shares = decodeUint(results.find((r: any) => r.id === i + 200)?.result ?? '0x')
+      const shares = decodeUint(results.find((r: any) => Number(r.id) === i + 200)?.result ?? '0x')
       if (shares === 0n) continue
       const decimals     = Number(pool.decimals ?? 18)
       const sharesFloat  = Number(shares) / Math.pow(10, decimals)
@@ -590,7 +590,9 @@ async function fetchGearbox(user: string): Promise<any[]> {
         label: pool.name ?? meta.token, asset: meta.token,
         shares: sharesFloat, amountUSD, apy: 0, netValueUSD: amountUSD,
         _needsMonPrice: !meta.isStable,
-        _expectedLiqPerShare: totalSupply > 0n ? Number(expectedLiq) / Number(totalSupply) / Math.pow(10, decimals) : 0,
+        // Exchange rate: expectedLiq/totalSupply (both in same raw units — no decimals division needed here)
+        // sharesFloat already accounts for decimals; multiplying by this rate gives MON amount
+        _expectedLiqPerShare: totalSupply > 0n ? Number(expectedLiq) / Number(totalSupply) : 0,
       })
     }
     return positions
