@@ -927,11 +927,13 @@ async function fetchMerklAprs(): Promise<AprLookup> {
   }
   try {
     const res = await fetch(MERKL_API, {
-      signal: AbortSignal.timeout(8_000), cache: 'no-store',
+      signal: AbortSignal.timeout(12_000), cache: 'no-store',
+      headers: { 'Accept': 'application/json' },
     })
     if (!res.ok) return new Map()
-    const data: any[] = await res.json()
-    if (!Array.isArray(data)) return new Map()
+    const raw = await res.json()
+    const data: any[] = Array.isArray(raw) ? raw : (raw?.data ?? raw?.opportunities ?? [])
+    if (!data.length) return new Map()
 
     const PROTO_MAP: Record<string, string> = {
       curve: 'Curve', uniswap: 'Uniswap V3', pancakeswap: 'PancakeSwap V3',
