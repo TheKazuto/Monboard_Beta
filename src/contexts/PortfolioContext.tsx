@@ -110,7 +110,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   const loadingAddr   = useRef<string | null>(null)
   const lastAddr      = useRef<string | null>(null)  // track last loaded address
 
-  const flush = useCallback((addr: string) => {
+  const flush = useCallback((addr: string, final = false) => {
     const t = tokenRef.current
     const n = nftRef.current
     const d = defiRef.current.defiNetValueUSD ?? 0
@@ -129,8 +129,11 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       nftsNoKey:           nftsNoKeyRef.current,
     }
     setTotals(next)
-    // Keep cache updated with latest partial data
-    portfolioCache.set(addr.toLowerCase(), { totals: next, fetchedAt: Date.now() })
+    // Only write to cache when fully complete — prevents partial data (e.g. empty
+    // defiPositions from a mid-flight flush) from being served on next navigation
+    if (final) {
+      portfolioCache.set(addr.toLowerCase(), { totals: next, fetchedAt: Date.now() })
+    }
   }, [])
 
   const load = useCallback(async (addr: string, force = false) => {
@@ -227,7 +230,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     await Promise.allSettled([fetchTokens(), fetchNFTs(), fetchDefi()])
 
     if (loadingAddr.current === key) {
-      flush(addr)
+      flush(addr, true)  // final=true — write complete data to cache
       setStatus('done')
       setLastUpdated(new Date())
       loadingAddr.current = null
