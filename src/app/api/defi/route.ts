@@ -495,14 +495,19 @@ async function fetchCurve(user: string): Promise<any[]> {
     params: [{ to: pool.address, data: '0xddca3f43' }, 'latest'],
   }))
 
-  // eth_getLogs isolated — a timeout here must NOT kill the balance lookup
-  const [rpcRes, feeRes] = await Promise.all([
-    rpcBatch(balanceCalls, 10_000),
-    rpcBatch(feeCalls, 8_000),
-  ])
+  // Each RPC call isolated — failures in fees/logs must NOT kill the balance lookup
+  let rpcRes: any[] = []
+  let feeRes: any[] = []
+  let logs:   any[] = []
 
-  // Fetch logs separately with a generous timeout; silently ignore failures
-  let logs: any[] = []
+  try { rpcRes = await rpcBatch(balanceCalls, 12_000) }
+  catch { /* balance fetch failed — return empty */ }
+
+  if (rpcRes.length === 0) return []
+
+  try { feeRes = await rpcBatch(feeCalls, 8_000) }
+  catch { /* fee fetch failed — APR will be 0, positions still show */ }
+
   try {
     const logsRes = await rpcBatch([{
       jsonrpc: '2.0', id: 9999, method: 'eth_getLogs',
