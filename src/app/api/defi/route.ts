@@ -89,6 +89,7 @@ const SYMBOL_TO_COINGECKO: Record<string, string> = {
   gMON:   'monad',
   shMON:  'monad',
   aprMON: 'monad',
+  APR:    'monad',   // aprMON LST on Monad
   WETH:   'ethereum',
   WBTC:   'wrapped-bitcoin',
   USDC:   'usd-coin',
@@ -398,8 +399,9 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
     let s0Idx = 600
 
     for (const res of poolAddrResults) {
-      const meta = poolMeta[res.id]
-      if (!meta) { console.error('[defi][' + protocol + '] poolMeta miss id:', res.id, 'keys:', Object.keys(poolMeta)); continue }
+      // Coerce id to number — rpcBatch may return id as string or number depending on JSON parsing
+      const meta = poolMeta[Number(res.id)]
+      if (!meta) { console.error('[defi][' + protocol + '] poolMeta miss id:', res.id, '(as number:', Number(res.id), ') keys:', Object.keys(poolMeta)); continue }
       if (!res.result || res.result === '0x') { console.error('[defi][' + protocol + '] empty pool result for id:', res.id); continue }
       const poolAddr = decodeAddress(res.result)
       if (poolAddr === '0x0000000000000000000000000000000000000000') { console.error('[defi][' + protocol + '] zero pool addr'); continue }
@@ -418,8 +420,8 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
 
     const positions: any[] = []
     for (const s0 of slot0Results) {
-      const meta = slot0Meta[s0.id]
-      if (!meta) { console.error('[defi][' + protocol + '] slot0Meta miss id:', s0.id); continue }
+      const meta = slot0Meta[Number(s0.id)]
+      if (!meta) { console.error('[defi][' + protocol + '] slot0Meta miss id:', s0.id, '(as number:', Number(s0.id), ')'); continue }
       if (!s0.result || s0.result === '0x' || s0.result.length < 10) { console.error('[defi][' + protocol + '] bad slot0 result len:', s0.result?.length); continue }
       const d  = s0.result.slice(2)
       const w  = Array.from({ length: 4 }, (_, j) => d.slice(j * 64, (j + 1) * 64))
