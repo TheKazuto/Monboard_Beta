@@ -890,7 +890,7 @@ async function fetchEulerV2(user: string): Promise<any[]> {
 
 type AprLookup = Map<string, number>
 
-const MERKL_API = 'https://api.merkl.xyz/v4/opportunities?chainId=10143&status=LIVE&items=200'
+const MERKL_API = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=300'
 
 // Module-level Merkl cache — avoid re-fetching within same Worker lifetime
 let merklAprCache: { map: AprLookup; ts: number } | null = null
@@ -941,16 +941,18 @@ async function fetchMerklAprs(): Promise<AprLookup> {
     }
 
     const entries = data.flatMap((opp: any) => {
-      const rawProto = (opp.protocol ?? opp.mainProtocol ?? '').toLowerCase()
+      // Merkl uses mainProtocol as primary field, protocol as fallback
+      const rawProto = ((opp.mainProtocol ?? opp.protocol) ?? '').toLowerCase()
       const proto    = PROTO_MAP[rawProto] ?? ''
       if (!proto) return []
-      const apr   = Number(opp.apr ?? 0)
+      const apr = Number(opp.apr ?? 0)
       if (apr <= 0) return []
+      // Merkl tokens array: each item has { symbol, type } — filter out gauge/reward tokens
       const tokens: string[] = (opp.tokens ?? [])
-        .filter((t: any) => t.type === 'TOKEN')
+        .filter((t: any) => t.type === 'TOKEN' && !String(t.symbol ?? '').endsWith('-gauge'))
         .map((t: any) => String(t.symbol ?? ''))
         .filter(Boolean)
-      const label = String(opp.name ?? tokens.join('/') ?? '')
+      const label = String(opp.name ?? opp.identifier ?? tokens.join('/') ?? '')
       return [{ protocol: proto, tokens, label, apr }]
     })
 
