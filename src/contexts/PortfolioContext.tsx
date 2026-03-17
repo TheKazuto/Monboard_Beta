@@ -130,7 +130,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     // Only preserve cached positions if the cache is fresh (< 2 min old) to avoid
     // showing closed positions for too long after the user exits a protocol.
     const cacheAge    = prevCached ? Date.now() - prevCached.fetchedAt : Infinity
-    const cacheRecent = cacheAge < 2 * 60 * 1000
+    const cacheRecent = cacheAge < CACHE_TTL_MS  // preserve within the same cache window (5 min)
 
     let safePositions: any[]
     if (newPositions.length === 0) {
