@@ -930,7 +930,7 @@ const CURVANCE_CTOKENS_SEED = [
   '0x5ca6966543c0786f547446234492d2f11c82f11f',  // cgMON
 ]
 
-async function fetchCurvance(user: string): Promise<any[]> {
+async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
   try {
     const userPadded = user.slice(2).toLowerCase().padStart(64, '0')
 
@@ -996,12 +996,14 @@ async function fetchCurvance(user: string): Promise<any[]> {
 
     if (!positions.length) return []
 
+    // Use monPrice passed from caller (already fetched) — avoids a second price call
+    // and prevents positions being filtered out if priceCache fails
     const prices = await getTokenPricesUSD(allSymbols)
-    const monPrice = prices['WMON'] ?? prices['MON'] ?? 0
+    const effectiveMonPrice = (prices['WMON'] ?? prices['MON'] ?? 0) || monPrice
 
     return positions.map(p => {
-      const price     = prices[p.underlying] ?? monPrice
-      const amountUSD = p.userAssets * price
+      const price     = prices[p.underlying] ?? effectiveMonPrice
+      const amountUSD = p.userAssets * (price || effectiveMonPrice || 0.024)  // never 0
       return {
         protocol: 'Curvance', type: 'vault', logo: '💎',
         url: 'https://monad.curvance.com', chain: 'Monad',
@@ -1199,7 +1201,7 @@ export async function GET(req: NextRequest) {
       safeFetch('ShMonad',       () => fetchShMonad(address, MON_PRICE)),
       safeFetch('Lagoon',        () => fetchLagoon(address)),
       safeFetch('Kuru',          () => fetchKuru(address)),
-      safeFetch('Curvance',      () => fetchCurvance(address)),
+      safeFetch('Curvance',      () => fetchCurvance(address, MON_PRICE)),
       safeFetch('EulerV2',       () => fetchEulerV2(address)),
     ])
 
