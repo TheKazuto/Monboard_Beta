@@ -606,8 +606,13 @@ function injectBestAprs(positions: any[], map: AprLookup): any[] {
   })
 }
 
-// ─── Server-side cache per address ───────────────────────────────────────────
-const DEFI_CACHE_TTL = 3 * 60 * 1000
+// ─── Server-side cache per address (stale-while-revalidate) ─────────────────
+// FRESH  (age < TTL):         serve from cache → 0 Zerion calls
+// STALE  (age >= TTL):        serve stale immediately + revalidate async → 0 wait time
+// EMPTY  (no cache):          fetch and block → 1 Zerion call (first visit only)
+// IN-FLIGHT (promise exists): await in-flight → deduplicated, no extra Zerion call
+const DEFI_CACHE_TTL  = 3 * 60 * 1000   // fresh window: 3 min
+const DEFI_STALE_TTL  = 10 * 60 * 1000  // serve stale up to 10 min, revalidate async
 interface DefiCacheEntry { result: any; fetchedAt: number; promise: Promise<any> | null }
 const defiCache = new Map<string, DefiCacheEntry>()
 
@@ -688,14 +693,29 @@ export async function GET(req: NextRequest) {
   if (!debugMode) {
     const entry = defiCache.get(key)
     const now   = Date.now()
-    if (entry && !entry.promise && now - entry.fetchedAt < DEFI_CACHE_TTL) {
+    const age   = entry ? now - entry.fetchedAt : Infinity
+
+    // FRESH: serve immediately, no work needed
+    if (entry && !entry.promise && age < DEFI_CACHE_TTL) {
       return NextResponse.json(entry.result)
     }
+
+    // IN-FLIGHT: another request is already revalidating — join it
     if (entry?.promise) {
       try { return NextResponse.json(await entry.promise) } catch { /* fall through */ }
     }
+
+    // STALE: serve stale immediately and kick off background revalidation
+    if (entry?.result && age < DEFI_STALE_TTL) {
+      const bgPromise = fetchDefiForAddress(address, false)
+        .then(result  => { defiCache.set(key, { result, fetchedAt: Date.now(), promise: null }) })
+        .catch(()     => { const e = defiCache.get(key); if (e) defiCache.set(key, { ...e, promise: null }) })
+      defiCache.set(key, { ...entry, promise: bgPromise as any })
+      return NextResponse.json(entry.result)
+    }
   }
 
+  // EMPTY: first visit — must block until we have data
   const promise = fetchDefiForAddress(address, debugMode)
 
   if (!debugMode) {
