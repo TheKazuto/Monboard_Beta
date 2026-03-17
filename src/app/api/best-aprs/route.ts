@@ -1135,20 +1135,28 @@ async function fetchAllData() {
     lends,
     lastUpdated: Date.now(),
     totalEntries: all.length,
+    // Internal field — used by /api/defi for APR injection via ?format=entries
+    __entries: all.map(e => ({ protocol: e.protocol, tokens: e.tokens, label: e.label, apr: e.apr })),
   }
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
-export async function GET() {
-  const now = Date.now()
+export async function GET(req: NextRequest) {
+  const now    = Date.now()
+  const format = req.nextUrl.searchParams.get('format')
 
   if (serverCache && !serverCache.promise && now - serverCache.fetchedAt < CACHE_TTL) {
+    if (format === 'entries') {
+      // Return flat entries array for /api/defi APR injection
+      return NextResponse.json(serverCache.data?.__entries ?? [])
+    }
     return NextResponse.json(serverCache.data)
   }
 
   if (serverCache?.promise) {
     try {
       const data = await serverCache.promise
+      if (format === 'entries') return NextResponse.json(data?.__entries ?? [])
       return NextResponse.json(data)
     } catch { /* fall through to retry */ }
   }
@@ -1164,10 +1172,12 @@ export async function GET() {
   try {
     const data = await promise
     serverCache = { data, fetchedAt: Date.now(), promise: null }
+    if (format === 'entries') return NextResponse.json(data?.__entries ?? [])
     return NextResponse.json(data)
   } catch {
     if (serverCache) serverCache.promise = null
     if (serverCache?.data) {
+      if (format === 'entries') return NextResponse.json(serverCache.data?.__entries ?? [])
       return NextResponse.json(serverCache.data)
     }
     return NextResponse.json({ error: 'Failed to fetch APR data' }, { status: 500 })
