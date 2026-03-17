@@ -30,37 +30,37 @@ function Counter({ to, suffix = '' }: { to: number; suffix?: string }) {
 // ─── Features ─────────────────────────────────────────────────────────────────
 const FEATURES = [
   {
-    icon: '💼',
+    icon: '/features/feature-portfolio.png',
     title: 'Portfolio Overview',
     desc: 'Total wallet value in USD combining tokens, NFTs and DeFi positions. 24h change at a glance.',
     tag: 'Live',
   },
   {
-    icon: '📊',
+    icon: '/features/feature-defi.png',
     title: 'DeFi Positions',
     desc: 'All your active positions across 14+ Monad protocols — liquidity pools, lending, staking — in one view.',
     tag: '14+ protocols',
   },
   {
-    icon: '🔥',
+    icon: '/features/feature-aprs.png',
     title: 'Best APRs',
     desc: 'Real-time yield opportunities aggregated from every major Monad protocol. No hardcoded values.',
     tag: 'Real-time',
   },
   {
-    icon: '🔁',
+    icon: '/features/feature-swap.png',
     title: 'Swap & Bridge',
     desc: 'Cross-chain swaps across 70+ networks, best rate from 360+ DEXes and bridges via Rubic.',
     tag: 'Cross-chain',
   },
   {
-    icon: '🛡️',
+    icon: '/features/feature-security.png',
     title: 'Security Scanner',
     desc: 'Token approval scanner with one-click revoke. Know exactly which contracts have access to your funds.',
     tag: 'On-chain',
   },
   {
-    icon: '📜',
+    icon: '/features/feature-history.png',
     title: 'Transaction History',
     desc: 'Full on-chain history with smart classification: sends, swaps, DeFi, NFT mints and more.',
     tag: 'Full history',
@@ -367,7 +367,7 @@ export default function LandingPage() {
             </h1>
 
             <p className="reveal d3" style={{ fontSize: 'clamp(1rem, 2.5vw, 1.2rem)', color: 'var(--land-muted)', lineHeight: 1.7, maxWidth: '580px', margin: '0 auto 2.5rem' }}>
-              Track tokens, DeFi positions, NFTs and transaction history across the entire Monad ecosystem — in one clean, real-time dashboard. Free forever.
+              Track tokens, DeFi positions, NFTs and transaction history across the entire Monad ecosystem in one clean, real-time dashboard.
             </p>
 
             <div className="reveal d4" style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -412,7 +412,7 @@ export default function LandingPage() {
             <span className="tag" style={{ marginBottom: '1rem', display: 'inline-block' }}>Features</span>
             <h2 className="land-h2">Everything you need to navigate Monad</h2>
             <p style={{ color: 'var(--land-muted)', marginTop: '0.75rem', maxWidth: '520px', margin: '0.75rem auto 0' }}>
-              From portfolio tracking to yield hunting — all your on-chain activity, organized.
+              From portfolio tracking to yield hunting, all your on-chain activity organized.
             </p>
           </div>
 
@@ -420,7 +420,7 @@ export default function LandingPage() {
             {FEATURES.map(({ icon, title, desc, tag }) => (
               <div key={title} className="feat-card">
                 <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.875rem' }}>
-                  <span style={{ fontSize: '1.75rem', lineHeight: 1 }}>{icon}</span>
+                  <img src={icon} alt={title} style={{ width: '64px', height: '64px', objectFit: 'contain' }} />
                   <span className="tag">{tag}</span>
                 </div>
                 <h3 style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: '1.05rem', marginBottom: '0.5rem' }}>
@@ -482,7 +482,7 @@ export default function LandingPage() {
                 'Cross-chain swaps built in',
                 'Security scanner for approvals',
                 'Portfolio history up to 1 year',
-                'Fully free, no wallet required to browse',
+                'The main DeFi tools in one place',
                 'Dark mode & mobile responsive',
               ].map(item => (
                 <div key={item} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', padding: '0.75rem 1rem', background: 'var(--land-card)', borderRadius: '10px', border: '1px solid var(--land-border)' }}>
@@ -506,7 +506,7 @@ export default function LandingPage() {
             Start tracking your Monad portfolio today
           </h2>
           <p style={{ color: 'var(--land-muted)', marginBottom: '2.5rem', fontSize: '1rem' }}>
-            Free forever. No sign-up. Just connect your wallet.
+            No sign-up. Just connect your wallet.
           </p>
           <Link href="/dashboard" className="btn-launch btn-launch-lg">
             Launch Dashboard →
@@ -518,7 +518,7 @@ export default function LandingPage() {
           <p>
             Built by{' '}
             <a href="https://www.shinkalabs.tech/" target="_blank" rel="noopener noreferrer">Shinka Labs</a>
-            {' '}· MonBoard 🟣 ·{' '}
+            {' '}· MonBoard ·{' '}
             <a href="https://t.me/ShinkaLabs" target="_blank" rel="noopener noreferrer">Telegram</a>
             {' '}·{' '}
             <a href="https://x.com/XShinkaLabsX" target="_blank" rel="noopener noreferrer">Twitter</a>
