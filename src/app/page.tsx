@@ -422,7 +422,7 @@ export default function LandingPage() {
                 <div style={{ marginBottom: '1rem' }}>
                   <span className="tag">{tag}</span>
                 </div>
-                <img src={icon} alt={title} style={{ width: '100%', height: '160px', objectFit: 'cover', borderRadius: '12px', marginBottom: '1.25rem' }} />
+                <img src={icon} alt={title} style={{ width: '100%', height: 'auto', objectFit: 'contain', borderRadius: '12px', marginBottom: '1.25rem', display: 'block' }} />
                 <h3 style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: '1.05rem', marginBottom: '0.5rem' }}>
                   {title}
                 </h3>
