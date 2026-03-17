@@ -322,38 +322,84 @@ async function fetchUpshift(user: string): Promise<any[]> {
 }
 
 // ─── EULER V2 ─────────────────────────────────────────────────────────────────
-async function fetchEulerV2(user: string): Promise<any[]> {
-  const query = `query($account:String!,$chainId:Int!){
-    userPositions(where:{account:$account,chainId:$chainId}){
-      vault{address name asset{symbol decimals}}
-      supplyShares supplyAssetsUsd borrowShares borrowAssetsUsd healthScore
-    }
-  }`
+// Uses the REST indexer (replaces the blocked GraphQL endpoint).
+// Two calls:
+//   1. /v2/vault/list     → vault metadata (name, assetSymbol, assetDecimals, assetPrice, supplyApy)
+//   2. /v2/account/positions → user balances (assets, borrowed per vault)
+const EULER_INDEXER   = 'https://indexer-prod.euler.finance/v2'
+// Server-side vault metadata cache (10 min) — shared across users, reduces calls
+let eulerVaultCache: { map: Map<string, any>; ts: number } | null = null
+const EULER_VAULT_TTL = 10 * 60 * 1000
+
+async function getEulerVaultMap(): Promise<Map<string, any>> {
+  if (eulerVaultCache && Date.now() - eulerVaultCache.ts < EULER_VAULT_TTL) {
+    return eulerVaultCache.map
+  }
+  const map = new Map<string, any>()
   try {
-    const res = await fetchThrottled('https://api.euler.finance/graphql', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables: { account: user.toLowerCase(), chainId: 143 } }),
+    // Fetch up to 200 vaults (77 currently on Monad) in one request
+    const res = await fetchThrottled(`${EULER_INDEXER}/vault/list?chainId=143&take=200`, {
       signal: AbortSignal.timeout(10_000), cache: 'no-store',
     })
-    if (!res.ok) return []
-    const data      = await res.json()
-    const positions = data?.data?.userPositions ?? []
-    return positions
-      .filter((p: any) => Number(p.supplyAssetsUsd ?? 0) + Number(p.borrowAssetsUsd ?? 0) > 0.01)
-      .map((p: any) => {
-        const supUSD = Number(p.supplyAssetsUsd ?? 0)
-        const borUSD = Number(p.borrowAssetsUsd ?? 0)
-        const sym    = p.vault?.asset?.symbol ?? '?'
-        return {
-          protocol: 'Euler V2', type: 'lending', logo: '📐',
-          url: 'https://app.euler.finance', chain: 'Monad', label: p.vault?.name ?? sym,
-          supply: supUSD > 0.01 ? [{ symbol: sym, amountUSD: supUSD }] : [],
-          collateral: [], borrow: borUSD > 0.01 ? [{ symbol: sym, amountUSD: borUSD }] : [],
-          totalCollateralUSD: supUSD, totalDebtUSD: borUSD,
-          netValueUSD: supUSD - borUSD,
-          healthFactor: p.healthScore ? Number(p.healthScore) : null,
-        }
+    if (!res.ok) return map
+    const items: any[] = (await res.json())?.items ?? []
+    for (const v of items) {
+      map.set((v.vault ?? '').toLowerCase(), v)
+    }
+    eulerVaultCache = { map, ts: Date.now() }
+  } catch { /* return empty map */ }
+  return map
+}
+
+async function fetchEulerV2(user: string): Promise<any[]> {
+  try {
+    // Fetch vault map and user positions in parallel (2 HTTP calls via httpSem)
+    const [vaultMap, posRes] = await Promise.all([
+      getEulerVaultMap(),
+      fetchThrottled(`${EULER_INDEXER}/account/positions?chainId=143&address=${user}`, {
+        signal: AbortSignal.timeout(10_000), cache: 'no-store',
+      }),
+    ])
+    if (!posRes.ok) return []
+    const data     = await posRes.json()
+    // Response key is the checksummed user address — find it case-insensitively
+    const key      = Object.keys(data).find(k => k.toLowerCase() === user.toLowerCase()) ?? ''
+    const savings  = data[key]?.savings ?? {}
+
+    const positions: any[] = []
+    for (const [vaultAddr, s] of Object.entries(savings) as [string, any][]) {
+      const assetsRaw   = BigInt(s.assets   ?? '0')
+      const borrowedRaw = BigInt(s.borrowed ?? '0')
+      if (assetsRaw === 0n && borrowedRaw === 0n) continue
+
+      const vaultMeta   = vaultMap.get(vaultAddr.toLowerCase())
+      const assetSym    = vaultMeta?.assetSymbol   ?? '?'
+      const assetDec    = Number(vaultMeta?.assetDecimals ?? 18)
+      const assetPrice  = Number(vaultMeta?.assetPrice    ?? 0)
+      const vaultName   = vaultMeta?.vaultName ?? `Euler ${assetSym}`
+      const supplyApy   = Number(vaultMeta?.supplyApy?.totalApy ?? 0)
+
+      const supplyAmt   = Number(assetsRaw)   / Math.pow(10, assetDec)
+      const borrowAmt   = Number(borrowedRaw) / Math.pow(10, assetDec)
+      const supUSD      = supplyAmt * assetPrice
+      const borUSD      = borrowAmt * assetPrice
+
+      if (supUSD < 0.01 && borUSD < 0.01) continue
+
+      positions.push({
+        protocol: 'Euler V2', type: 'lending', logo: '📐',
+        url: `https://app.euler.finance/vault/${vaultAddr}?network=monad`, chain: 'Monad',
+        label: vaultName,
+        supply:     supUSD > 0.01 ? [{ symbol: assetSym, amount: supplyAmt, amountUSD: supUSD }] : [],
+        collateral: [],
+        borrow:     borUSD > 0.01 ? [{ symbol: assetSym, amount: borrowAmt, amountUSD: borUSD }] : [],
+        totalCollateralUSD: supUSD, totalDebtUSD: borUSD,
+        netValueUSD: supUSD - borUSD,
+        healthFactor: null,  // available via liquidityInfo if needed
+        apy: supplyApy,
       })
+    }
+    return positions
   } catch (e: any) { console.error('[defi][EulerV2]', e?.message ?? e); return [] }
 }
 
