@@ -64,6 +64,7 @@ const ZERION_AUTH = () => {
 const ZERION_PROTO_CONFIG: Record<string, { logo: string; type: string }> = {
   'Curvance':      { logo: '💎', type: 'lending'   },
   'Curve':         { logo: '🌊', type: 'liquidity'  },
+  'Euler Yield':   { logo: '📐', type: 'vault'      },
   'Kuru':          { logo: '🌀', type: 'liquidity'  },
   'LAGOON':        { logo: '🏝️', type: 'vault'      },
   'Morpho':        { logo: '🦋', type: 'vault'      },
@@ -76,6 +77,7 @@ function zerionProtoUrl(proto: string, appUrl: string): string {
   const defaults: Record<string, string> = {
     'Curvance':      'https://monad.curvance.com',
     'Curve':         'https://curve.finance/dex/monad',
+    'Euler Yield':   'https://app.euler.finance/?network=monad',
     'Kuru':          'https://www.kuru.io/vaults',
     'LAGOON':        'https://app.lagoon.finance',
     'Morpho':        'https://app.morpho.org/monad',
@@ -672,13 +674,13 @@ async function fetchDefiForAddress(address: string, debugMode: boolean): Promise
   }
 
   // All fetchers in parallel — Zerion replaces 6 on-chain fetchers with 1 HTTP call
-  const [zerionR, gearR, upshiftR, lstsR, eulerR, uniR, pcakeR] =
+  // EulerV2 is now indexed by Zerion — no separate fetcher needed
+  const [zerionR, gearR, upshiftR, lstsR, uniR, pcakeR] =
     await Promise.allSettled([
       safeFetch('Zerion',        () => fetchZerion(address)),
       safeFetch('Gearbox',       () => fetchGearbox(address, MON_PRICE)),
       safeFetch('Upshift',       () => fetchUpshift(address)),
       safeFetch('MonLSTs',       () => fetchMonLSTs(address, MON_PRICE)),
-      safeFetch('EulerV2',       () => fetchEulerV2(address)),
       safeFetch('UniswapV3',     () => fetchUniswapV3(address, 'Uniswap V3',    UNI_NFT_PM, UNI_FACTORY)),
       safeFetch('PancakeswapV3', () => fetchUniswapV3(address, 'PancakeSwap V3', '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364', '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865')),
     ])
@@ -695,7 +697,7 @@ async function fetchDefiForAddress(address: string, debugMode: boolean): Promise
       ['Kintsu',  { status: 'fulfilled', value: lstPositions.filter(p => p.protocol === 'Kintsu')  }],
       ['Magma',   { status: 'fulfilled', value: lstPositions.filter(p => p.protocol === 'Magma')   }],
       ['ShMonad', { status: 'fulfilled', value: lstPositions.filter(p => p.protocol === 'shMonad') }],
-      ['EulerV2', eulerR], ['UniswapV3', uniR], ['PancakeswapV3', pcakeR],
+      ['UniswapV3', uniR], ['PancakeswapV3', pcakeR],
     ]
     return {
       __debug: true, monPrice: MON_PRICE,
@@ -711,7 +713,7 @@ async function fetchDefiForAddress(address: string, debugMode: boolean): Promise
   let allPositions = [
     ...unwrap(zerionR),
     ...unwrap(gearR), ...unwrap(upshiftR), ...lstPositions,
-    ...unwrap(eulerR), ...unwrap(uniR), ...unwrap(pcakeR),
+    ...unwrap(uniR), ...unwrap(pcakeR),
   ]
 
   const bestAprsMap = await buildAprLookup()
