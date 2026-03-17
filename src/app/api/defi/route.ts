@@ -736,6 +736,7 @@ const CURVANCE_SUPPLY_CTOKENS: Array<{ addr: string; symbol: string; underlying:
 const CURVANCE_DEBT_CTOKENS: Array<{ addr: string; symbol: string; underlying: string; assetDec: number }> = [
   { addr: '0x8ee9fc28b8da872c38a496e9ddb9700bb7261774', symbol: 'dUSDC', underlying: 'USDC', assetDec: 6 },
 ]
+const CURVANCE_MARKET_MGR  = '0x1310f352f1389969ece6741671c4b919523912ff'
 const CURVANCE_BORROW_SEL  = '0x11005b07'  // borrowDebt(address) → uint256 in asset decimals
 const CURVANCE_ORACLE_SEL  = '0x5b07871a'  // getAssetPrice(address) → uint256 (18dp USD)
 // Underlying asset addresses for oracle price lookup
