@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 // Fix #4: MONAD_RPC imported from shared lib — removes local duplicate declaration
 // Fix #7: getMonPrice imported as getSharedMonPrice — removes local fetchMonPrice function
 import { rpcBatch, MONAD_RPC, getMonPrice as getSharedMonPrice } from '@/lib/monad'
