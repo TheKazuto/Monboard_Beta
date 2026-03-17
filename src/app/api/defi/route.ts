@@ -721,61 +721,102 @@ async function fetchKuru(user: string): Promise<any[]> {
 }
 
 // ─── CURVANCE ─────────────────────────────────────────────────────────────────
-// No on-chain registry exposes all Curvance cTokens.
-// Seed list covers all known markets. New markets: add cToken address here.
-const CURVANCE_CTOKENS_SEED = [
-  '0x1e240e30e51491546dec3af16b0b4eac8dd110d4',  // cWMON
-  '0xd9e2025b907e95ecc963a5018f56b87575b4ab26',  // caprMON
-  '0x926c101cf0a3de8725eb24a93e980f9fe34d6230',  // cshMON
-  '0x494876051b0e85dce5ecd5822b1ad39b9660c928',  // csMON
-  '0x5ca6966543c0786f547446234492d2f11c82f11f',  // cgMON
+// Supply cTokens: supply shares in slot[4] of 0x21570256(user) struct.
+//                 convert via (shares / totalSupply) * totalAssets * assetPrice
+// Debt cTokens:   borrow balance via selector 0x11005b07(user) in asset decimals.
+// Health Factor:  totalSupplyUSD / totalBorrowUSD (simple collateral/debt ratio).
+// New markets: add cToken address to SUPPLY or DEBT list below.
+const CURVANCE_SUPPLY_CTOKENS: Array<{ addr: string; symbol: string; underlying: string; assetDec: number }> = [
+  { addr: '0x1e240e30e51491546dec3af16b0b4eac8dd110d4', symbol: 'cWMON',   underlying: 'WMON', assetDec: 18 },
+  { addr: '0xd9e2025b907e95ecc963a5018f56b87575b4ab26', symbol: 'caprMON', underlying: 'aprMON', assetDec: 18 },
+  { addr: '0x926c101cf0a3de8725eb24a93e980f9fe34d6230', symbol: 'cshMON',  underlying: 'shMON', assetDec: 18 },
+  { addr: '0x494876051b0e85dce5ecd5822b1ad39b9660c928', symbol: 'csMON',   underlying: 'sMON', assetDec: 18 },
+  { addr: '0x5ca6966543c0786f547446234492d2f11c82f11f', symbol: 'cgMON',   underlying: 'gMON', assetDec: 18 },
 ]
-const CURVANCE_CTOKEN_NAMES: Record<string, string> = {
-  '0x1e240e30e51491546dec3af16b0b4eac8dd110d4': 'cWMON',
-  '0xd9e2025b907e95ecc963a5018f56b87575b4ab26': 'caprMON',
-  '0x926c101cf0a3de8725eb24a93e980f9fe34d6230': 'cshMON',
-  '0x494876051b0e85dce5ecd5822b1ad39b9660c928': 'csMON',
-  '0x5ca6966543c0786f547446234492d2f11c82f11f': 'cgMON',
-}
+const CURVANCE_DEBT_CTOKENS: Array<{ addr: string; symbol: string; underlying: string; assetDec: number }> = [
+  { addr: '0x8ee9fc28b8da872c38a496e9ddb9700bb7261774', symbol: 'dUSDC', underlying: 'USDC', assetDec: 6 },
+]
+const CURVANCE_BORROW_SEL = '0x11005b07'  // borrowDebt(address) → uint256 in asset decimals
 
 async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
   try {
-    // 15 calls: 5 cTokens × (balanceOf + totalAssets + totalSupply)
+    const STABLES = new Set(['USDC', 'AUSD', 'USDT'])
+    const price = (sym: string) => STABLES.has(sym) ? 1 : (monPrice || 0.024)
+
+    const allCtokens = [...CURVANCE_SUPPLY_CTOKENS, ...CURVANCE_DEBT_CTOKENS]
+
+    // Batch: supply ctokens get (position struct, totalAssets, totalSupply)
+    //        debt ctokens get (borrowDebt selector)
     const calls: any[] = []
-    CURVANCE_CTOKENS_SEED.forEach((addr, i) => {
-      calls.push(ethCall(addr, balanceOfData(user), i * 3))
-      calls.push(ethCall(addr, '0x01e1d114',         i * 3 + 1))  // totalAssets()
-      calls.push(ethCall(addr, '0x18160ddd',         i * 3 + 2))  // totalSupply()
+    let id = 0
+    // Supply: 0x21570256(user) returns struct — slot[4] = supply shares (18dp)
+    CURVANCE_SUPPLY_CTOKENS.forEach(ct => {
+      calls.push(ethCall(ct.addr, '0x21570256' + user.slice(2).toLowerCase().padStart(64, '0'), id++))
+      calls.push(ethCall(ct.addr, '0x01e1d114', id++))  // totalAssets()
+      calls.push(ethCall(ct.addr, '0x18160ddd', id++))  // totalSupply()
     })
+    const debtStartId = id
+    // Debt: 0x11005b07(user) → debt amount in asset decimals
+    CURVANCE_DEBT_CTOKENS.forEach(ct => {
+      calls.push(ethCall(ct.addr, CURVANCE_BORROW_SEL + user.slice(2).toLowerCase().padStart(64, '0'), id++))
+    })
+
     const results = await rpcBatch(calls, 12_000)
     const getR = (n: number) => results.find((r: any) => Number(r.id) === n)?.result ?? '0x'
 
-    const positions: any[] = []
-    CURVANCE_CTOKENS_SEED.forEach((addr, i) => {
-      const sharesRaw = decodeUint(getR(i * 3))
-      if (sharesRaw === 0n) return
-      const assetsRaw = decodeUint(getR(i * 3 + 1))
-      const supplyRaw = decodeUint(getR(i * 3 + 2))
-      if (supplyRaw === 0n || assetsRaw === 0n) return
+    const supplyItems: Array<{ symbol: string; underlying: string; amount: number; amountUSD: number }> = []
+    const borrowItems: Array<{ symbol: string; underlying: string; amount: number; amountUSD: number }> = []
+    let baseId = 0
 
-      const symbol     = CURVANCE_CTOKEN_NAMES[addr] ?? ('c' + addr.slice(2, 8))
-      const underlying = symbol.startsWith('c') ? symbol.slice(1) : 'WMON'
-      const userAssets = Number(sharesRaw) / Number(supplyRaw) * Number(assetsRaw) / 1e18
+    // Parse supply positions
+    CURVANCE_SUPPLY_CTOKENS.forEach(ct => {
+      const structRaw = getR(baseId++)
+      const assetsRaw = decodeUint(getR(baseId++))
+      const supplyRaw = decodeUint(getR(baseId++))
+
+      if (!structRaw || structRaw === '0x' || structRaw.length < 2 + 6 * 64) return
+      // slot[4] = supply shares (18dp)
+      const hex     = structRaw.slice(2)
+      const sharesRaw = BigInt('0x' + hex.slice(4 * 64, 5 * 64))
+      if (sharesRaw === 0n || supplyRaw === 0n || assetsRaw === 0n) return
+
+      // ERC4626: user assets = (shares / totalSupply) * totalAssets
+      const userAssets = Number(sharesRaw) / Number(supplyRaw) * Number(assetsRaw) / Math.pow(10, ct.assetDec)
       if (userAssets < 0.001) return
 
-      // Use monPrice directly — no extra price fetch needed for MON-denominated assets
-      const price     = (underlying === 'USDC' || underlying === 'AUSD' || underlying === 'USDT') ? 1 : monPrice
-      const amountUSD = userAssets * (price || 0.024)
+      const amountUSD = userAssets * price(ct.underlying)
       if (amountUSD < 0.01) return
-
-      positions.push({
-        protocol: 'Curvance', type: 'vault', logo: '💎',
-        url: 'https://monad.curvance.com', chain: 'Monad',
-        label: symbol, asset: underlying,
-        amount: userAssets, amountUSD, apy: 0, netValueUSD: amountUSD,
-      })
+      supplyItems.push({ symbol: ct.symbol, underlying: ct.underlying, amount: userAssets, amountUSD })
     })
-    return positions
+
+    // Parse borrow positions
+    CURVANCE_DEBT_CTOKENS.forEach((ct, i) => {
+      const raw = getR(debtStartId + i)
+      const debtRaw = decodeUint(raw)
+      if (debtRaw === 0n) return
+      const amount    = Number(debtRaw) / Math.pow(10, ct.assetDec)
+      const amountUSD = amount * price(ct.underlying)
+      if (amountUSD < 0.01) return
+      borrowItems.push({ symbol: ct.symbol, underlying: ct.underlying, amount, amountUSD })
+    })
+
+    if (supplyItems.length === 0 && borrowItems.length === 0) return []
+
+    const totalSupplyUSD = supplyItems.reduce((s, x) => s + x.amountUSD, 0)
+    const totalBorrowUSD = borrowItems.reduce((s, x) => s + x.amountUSD, 0)
+    const netValueUSD    = totalSupplyUSD - totalBorrowUSD
+    const healthFactor   = totalBorrowUSD > 0 ? totalSupplyUSD / totalBorrowUSD : null
+
+    return [{
+      protocol: 'Curvance', type: 'lending', logo: '💎',
+      url: 'https://monad.curvance.com', chain: 'Monad', label: 'Curvance Position',
+      supply:   supplyItems.map(x => ({ symbol: x.underlying, amount: x.amount, amountUSD: x.amountUSD })),
+      borrow:   borrowItems.map(x => ({ symbol: x.underlying, amount: x.amount, amountUSD: x.amountUSD })),
+      totalCollateralUSD: totalSupplyUSD,
+      totalDebtUSD:       totalBorrowUSD,
+      netValueUSD,
+      healthFactor,
+    }]
   } catch (e: any) { console.error('[defi][Curvance]', e?.message ?? e); return [] }
 }
 
