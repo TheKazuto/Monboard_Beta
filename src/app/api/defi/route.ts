@@ -176,77 +176,92 @@ async function fetchNeverland(user: string): Promise<any[]> {
 }
 
 // ─── MORPHO ───────────────────────────────────────────────────────────────────
+// Hybrid approach: Morpho API provides vault metadata/APR, on-chain detects actual balances.
+// The Morpho API on Monad (chainId=143) doesn't yet index all deployed vaults.
+// MORPHO_EXTRA_VAULTS contains known vaults not indexed by the API.
+const MORPHO_API_URL = 'https://api.morpho.org/graphql'
+const MORPHO_EXTRA_VAULTS = [
+  '0x78999cc96d2ba0341588c60ccb0e91c6c33cf371',  // Hyperithm USDC Degen (not in API)
+]
+
 async function fetchMorpho(user: string): Promise<any[]> {
-  // Filter by chainId=143 to avoid positions on other chains for the same address
-  const query = `query($addr:String!,$cid:Int!){
-    userByAddress(address:$addr,chainId:$cid){
-      marketPositions{
-        market{
-          uniqueKey chainId
-          loanAsset{symbol decimals}
-          collateralAsset{symbol decimals}
-          state{supplyApy borrowApy}
-        }
-        supplyAssets supplyAssetsUsd
-        borrowAssets borrowAssetsUsd
-        collateral collateralUsd
-        healthFactor
-      }
-      vaultPositions{
-        vault{
-          address name symbol chainId
-          asset{symbol decimals}
-          state{netApy totalAssetsUsd}
-        }
-        assets assetsUsd
-      }
-    }
-  }`
+  const upad = user.slice(2).toLowerCase().padStart(64, '0')
+
+  // Step 1: fetch vault list from Morpho API
+  let apiVaults: Array<{ address: string; name: string; symbol: string; assetSymbol: string; assetDecimals: number; apy: number }> = []
   try {
-    const res  = await fetch('https://api.morpho.org/graphql', {
+    const res = await fetch(MORPHO_API_URL, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables: { addr: user.toLowerCase(), cid: 143 } }),
+      body: JSON.stringify({ query: `query{vaults(first:100,where:{chainId_in:[143]}){items{address name symbol asset{symbol decimals} state{netApy}}}}` }),
       signal: AbortSignal.timeout(10_000), cache: 'no-store',
     })
-    const data = await res.json()
-    const u    = data?.data?.userByAddress
-    if (!u) return []
-    const out: any[] = []
+    if (res.ok) {
+      const data = await res.json()
+      apiVaults = (data?.data?.vaults?.items ?? []).map((v: any) => ({
+        address:      (v.address ?? '').toLowerCase(),
+        name:         v.name ?? v.symbol ?? '',
+        symbol:       v.symbol ?? '',
+        assetSymbol:  v.asset?.symbol ?? 'USDC',
+        assetDecimals: Number(v.asset?.decimals ?? 6),
+        apy:          Number(v.state?.netApy ?? 0) * 100,
+      })).filter((v: any) => v.address)
+    }
+  } catch { /* fall through to on-chain only */ }
 
-    for (const p of u.marketPositions ?? []) {
-      // Extra guard: only process positions on Monad (chainId 143)
-      if (p.market?.chainId && Number(p.market.chainId) !== 143) continue
-      const supUSD = Number(p.supplyAssetsUsd ?? 0), borUSD = Number(p.borrowAssetsUsd ?? 0), colUSD = Number(p.collateralUsd ?? 0)
-      if (supUSD < 0.01 && borUSD < 0.01 && colUSD < 0.01) continue
-      const loanSym = p.market?.loanAsset?.symbol ?? '?', collSym = p.market?.collateralAsset?.symbol
-      const supplyApy = p.market?.state?.supplyApy ? Number(p.market.state.supplyApy) * 100 : 0
-      const borrowApy = p.market?.state?.borrowApy ? Number(p.market.state.borrowApy) * 100 : 0
-      const url = p.market?.uniqueKey ? `https://app.morpho.org/monad/market?id=${p.market.uniqueKey}` : 'https://app.morpho.org/monad'
-      out.push({
-        protocol: 'Morpho', type: 'lending', logo: '🦋', url, chain: 'Monad',
-        label: collSym ? `${collSym} / ${loanSym}` : loanSym,
-        supply:     supUSD > 0.01 ? [{ symbol: loanSym, amountUSD: supUSD, apy: supplyApy }] : [],
-        collateral: colUSD > 0.01 ? [{ symbol: collSym, amountUSD: colUSD }] : [],
-        borrow:     borUSD > 0.01 ? [{ symbol: loanSym, amountUSD: borUSD, apr: borrowApy }] : [],
-        totalCollateralUSD: colUSD + supUSD, totalDebtUSD: borUSD,
-        netValueUSD: colUSD + supUSD - borUSD,
-        healthFactor: p.healthFactor ? Number(p.healthFactor) : null,
-      })
-    }
-    for (const p of u.vaultPositions ?? []) {
-      if (p.vault?.chainId && Number(p.vault.chainId) !== 143) continue
-      const usd = Number(p.assetsUsd ?? 0)
-      if (usd < 0.01) continue
-      const url = p.vault?.address ? `https://app.morpho.org/monad/vault?address=${p.vault.address}` : 'https://app.morpho.org/monad'
-      out.push({
-        protocol: 'Morpho', type: 'vault', logo: '🦋', url, chain: 'Monad',
-        label: p.vault?.name ?? p.vault?.symbol, asset: p.vault?.asset?.symbol,
-        amountUSD: usd, apy: p.vault?.state?.netApy ? Number(p.vault.state.netApy) * 100 : 0, netValueUSD: usd,
-      })
-    }
-    return out
-  } catch (e: any) { console.error('[defi][Morpho]', e?.message ?? e); return [] }
+  // Merge API vaults with extra known vaults (deduplicated)
+  const apiAddrs = new Set(apiVaults.map(v => v.address))
+  const allAddrs = [
+    ...apiVaults.map(v => v.address),
+    ...MORPHO_EXTRA_VAULTS.map(a => a.toLowerCase()).filter(a => !apiAddrs.has(a)),
+  ]
+  if (!allAddrs.length) return []
+
+  // Step 2: on-chain — balanceOf + totalAssets + totalSupply + asset() for each vault
+  const calls: any[] = []
+  allAddrs.forEach((addr, i) => {
+    calls.push(ethCall(addr, balanceOfData(user), i * 4))
+    calls.push(ethCall(addr, '0x01e1d114',         i * 4 + 1))  // totalAssets()
+    calls.push(ethCall(addr, '0x18160ddd',         i * 4 + 2))  // totalSupply()
+    calls.push(ethCall(addr, '0x38d52e0f',         i * 4 + 3))  // asset()
+  })
+  const results = await rpcBatch(calls, 12_000)
+  const getR = (n: number) => results.find((r: any) => Number(r.id) === n)?.result ?? '0x'
+
+  const positions: any[] = []
+  for (let i = 0; i < allAddrs.length; i++) {
+    const addr    = allAddrs[i]
+    const shares  = decodeUint(getR(i * 4))
+    if (shares === 0n) continue
+    const taRaw   = decodeUint(getR(i * 4 + 1))
+    const tsRaw   = decodeUint(getR(i * 4 + 2))
+    if (tsRaw === 0n || taRaw === 0n) continue
+
+    // Get metadata from API if available, otherwise resolve from chain
+    const meta = apiVaults.find(v => v.address === addr)
+    const assetDec   = meta?.assetDecimals ?? 6
+    const assetSym   = meta?.assetSymbol ?? 'USDC'
+    const vaultName  = meta?.name ?? ''
+    const apy        = meta?.apy ?? 0
+
+    // ERC4626: user assets = (shares / totalSupply) * totalAssets
+    const userAssets = Number(shares) / Number(tsRaw) * Number(taRaw) / Math.pow(10, assetDec)
+    if (userAssets < 0.001) continue
+
+    // Price: stables = $1 (USDC, USDT, AUSD), others need lookup
+    const STABLES = new Set(['USDC', 'USDT', 'USDT0', 'AUSD'])
+    const amountUSD = STABLES.has(assetSym) ? userAssets : userAssets  // extend for non-stables if needed
+    if (amountUSD < 0.01) continue
+
+    const url = `https://app.morpho.org/monad/vault?address=${addr}`
+    positions.push({
+      protocol: 'Morpho', type: 'vault', logo: '🦋', url, chain: 'Monad',
+      label: vaultName || assetSym, asset: assetSym,
+      amountUSD, apy, netValueUSD: amountUSD,
+    })
+  }
+  return positions
 }
+
 
 // ─── UNISWAP V3 / PANCAKESWAP V3 ─────────────────────────────────────────────
 const UNI_NFT_PM  = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53'
