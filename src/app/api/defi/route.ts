@@ -736,61 +736,74 @@ const CURVANCE_SUPPLY_CTOKENS: Array<{ addr: string; symbol: string; underlying:
 const CURVANCE_DEBT_CTOKENS: Array<{ addr: string; symbol: string; underlying: string; assetDec: number }> = [
   { addr: '0x8ee9fc28b8da872c38a496e9ddb9700bb7261774', symbol: 'dUSDC', underlying: 'USDC', assetDec: 6 },
 ]
-const CURVANCE_BORROW_SEL = '0x11005b07'  // borrowDebt(address) → uint256 in asset decimals
+const CURVANCE_BORROW_SEL  = '0x11005b07'  // borrowDebt(address) → uint256 in asset decimals
+const CURVANCE_ORACLE_SEL  = '0x5b07871a'  // getAssetPrice(address) → uint256 (18dp USD)
+// Underlying asset addresses for oracle price lookup
+const CURVANCE_ASSET_ADDRS: Record<string, string> = {
+  WMON:   '0x3bd359c1119da7da1d913d1c4d2b7c461115433a',
+  aprMON: '0xa3227c5969757783154c60bf0bc1944180ed81b9',  // sMON proxy
+  shMON:  '0x1b68626dca36c7fe922fd2d55e4f631d962de19c',
+  sMON:   '0xa3227c5969757783154c60bf0bc1944180ed81b9',
+  gMON:   '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081',
+}
 
 async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
   try {
     const STABLES = new Set(['USDC', 'AUSD', 'USDT'])
-    const price = (sym: string) => STABLES.has(sym) ? 1 : (monPrice || 0.024)
+    const upad    = user.slice(2).toLowerCase().padStart(64, '0')
 
-    // Batch: supply ctokens get (position struct, totalAssets, totalSupply)
-    //        debt ctokens get (borrowDebt selector)
+    // Single batch: supply struct+totalAssets+totalSupply, debt balance, oracle prices
     const calls: any[] = []
     let id = 0
-    // Supply: 0x21570256(user) returns struct — slot[4] = supply shares (18dp)
+
     CURVANCE_SUPPLY_CTOKENS.forEach(ct => {
-      calls.push(ethCall(ct.addr, '0x21570256' + user.slice(2).toLowerCase().padStart(64, '0'), id++))
-      calls.push(ethCall(ct.addr, '0x01e1d114', id++))  // totalAssets()
-      calls.push(ethCall(ct.addr, '0x18160ddd', id++))  // totalSupply()
+      calls.push(ethCall(ct.addr, '0x21570256' + upad, id++))  // position struct — slot[4]=shares
+      calls.push(ethCall(ct.addr, '0x01e1d114',        id++))  // totalAssets()
+      calls.push(ethCall(ct.addr, '0x18160ddd',        id++))  // totalSupply()
     })
     const debtStartId = id
-    // Debt: 0x11005b07(user) → debt amount in asset decimals
     CURVANCE_DEBT_CTOKENS.forEach(ct => {
-      calls.push(ethCall(ct.addr, CURVANCE_BORROW_SEL + user.slice(2).toLowerCase().padStart(64, '0'), id++))
+      calls.push(ethCall(ct.addr, CURVANCE_BORROW_SEL + upad, id++))
+    })
+    // Oracle prices for non-stable underlyings (Curvance internal oracle)
+    const oracleStartId = id
+    const uniqueNonStable = [...new Set(CURVANCE_SUPPLY_CTOKENS.filter(ct => !STABLES.has(ct.underlying)).map(ct => ct.underlying))]
+    uniqueNonStable.forEach(sym => {
+      const assetAddr = CURVANCE_ASSET_ADDRS[sym]
+      if (assetAddr) calls.push(ethCall(CURVANCE_MARKET_MGR, CURVANCE_ORACLE_SEL + assetAddr.slice(2).toLowerCase().padStart(64, '0'), id++))
     })
 
     const results = await rpcBatch(calls, 12_000)
     const getR = (n: number) => results.find((r: any) => Number(r.id) === n)?.result ?? '0x'
 
+    // Build oracle price map — 18dp → USD (use Curvance's own price feed for accuracy)
+    const oraclePrices: Record<string, number> = {}
+    uniqueNonStable.forEach((sym, i) => {
+      const raw = decodeUint(getR(oracleStartId + i))
+      if (raw > 0n) oraclePrices[sym] = Number(raw) / 1e18
+    })
+    const price = (sym: string): number => STABLES.has(sym) ? 1 : (oraclePrices[sym] ?? monPrice ?? 0.024)
+
     const supplyItems: Array<{ symbol: string; underlying: string; amount: number; amountUSD: number }> = []
     const borrowItems: Array<{ symbol: string; underlying: string; amount: number; amountUSD: number }> = []
     let baseId = 0
 
-    // Parse supply positions
     CURVANCE_SUPPLY_CTOKENS.forEach(ct => {
       const structRaw = getR(baseId++)
       const assetsRaw = decodeUint(getR(baseId++))
       const supplyRaw = decodeUint(getR(baseId++))
-
       if (!structRaw || structRaw === '0x' || structRaw.length < 2 + 6 * 64) return
-      // slot[4] = supply shares (18dp)
-      const hex     = structRaw.slice(2)
-      const sharesRaw = BigInt('0x' + hex.slice(4 * 64, 5 * 64))
+      const sharesRaw = BigInt('0x' + structRaw.slice(2).slice(4 * 64, 5 * 64))
       if (sharesRaw === 0n || supplyRaw === 0n || assetsRaw === 0n) return
-
-      // ERC4626: user assets = (shares / totalSupply) * totalAssets
       const userAssets = Number(sharesRaw) / Number(supplyRaw) * Number(assetsRaw) / Math.pow(10, ct.assetDec)
       if (userAssets < 0.001) return
-
       const amountUSD = userAssets * price(ct.underlying)
       if (amountUSD < 0.01) return
       supplyItems.push({ symbol: ct.symbol, underlying: ct.underlying, amount: userAssets, amountUSD })
     })
 
-    // Parse borrow positions
     CURVANCE_DEBT_CTOKENS.forEach((ct, i) => {
-      const raw = getR(debtStartId + i)
-      const debtRaw = decodeUint(raw)
+      const debtRaw = decodeUint(getR(debtStartId + i))
       if (debtRaw === 0n) return
       const amount    = Number(debtRaw) / Math.pow(10, ct.assetDec)
       const amountUSD = amount * price(ct.underlying)
@@ -803,7 +816,12 @@ async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
     const totalSupplyUSD = supplyItems.reduce((s, x) => s + x.amountUSD, 0)
     const totalBorrowUSD = borrowItems.reduce((s, x) => s + x.amountUSD, 0)
     const netValueUSD    = totalSupplyUSD - totalBorrowUSD
-    const healthFactor   = totalBorrowUSD > 0 ? totalSupplyUSD / totalBorrowUSD : null
+    // Health Factor: totalSupplyUSD / totalBorrowUSD (standard convention: 1.0 = liquidation threshold).
+    // Curvance's UI shows (1 - borrow/collateral)*100% which maps to the same scale.
+    // e.g. HF=1.92 → (1 - 1/1.92)*100 ≈ 48% remaining buffer — same position, different display.
+    const healthFactor   = totalBorrowUSD > 0 && totalSupplyUSD > 0
+      ? totalSupplyUSD / totalBorrowUSD
+      : null
 
     return [{
       protocol: 'Curvance', type: 'lending', logo: '💎',
