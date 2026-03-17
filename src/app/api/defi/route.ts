@@ -743,8 +743,6 @@ async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
     const STABLES = new Set(['USDC', 'AUSD', 'USDT'])
     const price = (sym: string) => STABLES.has(sym) ? 1 : (monPrice || 0.024)
 
-    const allCtokens = [...CURVANCE_SUPPLY_CTOKENS, ...CURVANCE_DEBT_CTOKENS]
-
     // Batch: supply ctokens get (position struct, totalAssets, totalSupply)
     //        debt ctokens get (borrowDebt selector)
     const calls: any[] = []
