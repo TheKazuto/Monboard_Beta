@@ -916,71 +916,100 @@ async function fetchKuru(user: string): Promise<any[]> {
   } catch (e: any) { console.error('[defi] fetchKuru error:', e?.message ?? String(e)); return [] }
 }
 
-// ─── CURVANCE ─────────────────────────────────────────────────────────────────
-const CURVANCE_CTOKENS: Record<string, { underlying: string; decimals: number; market: string }> = {
-  '0xD9E2025b907E95EcC963A5018f56B87575B4aB26': { underlying: 'aprMON', decimals: 18, market: 'aprMON/WMON' },
-  '0x926C101Cf0a3dE8725Eb24a93E980f9FE34d6230': { underlying: 'shMON',  decimals: 18, market: 'shMON/WMON'  },
-  '0x494876051B0E85dCe5ecd5822B1aD39b9660c928': { underlying: 'sMON',   decimals: 18, market: 'sMON/WMON'   },
-  '0x5ca6966543c0786f547446234492d2f11c82f11f': { underlying: 'gMON',   decimals: 18, market: 'gMON/WMON'   },
-}
-const CURVANCE_DEBT_CTOKENS: Record<string, { underlying: string; decimals: number; market: string }> = {
-  '0xf473568b26b8c5aadca9fbc0ea17e1728d5ec925': { underlying: 'WMON', decimals: 18, market: 'gMON/WMON'   },
-  '0xF32B334042DC1EB9732454cc9bc1a06205d184f2': { underlying: 'WMON', decimals: 18, market: 'aprMON/WMON' },
-  '0x0fcEd51b526BfA5619F83d97b54a57e3327eB183': { underlying: 'WMON', decimals: 18, market: 'shMON/WMON'  },
-  '0xebE45A6ceA7760a71D8e0fa5a0AE80a75320D708': { underlying: 'WMON', decimals: 18, market: 'sMON/WMON'   },
-}
+// ─── CURVANCE ─────────────────────────────────────────────────────────────────────────────
+// No on-chain registry exposes all Curvance cTokens.
+// Seed list + 'entered markets' from market manager covers all known positions.
+// New markets: add cToken address to CURVANCE_CTOKENS_SEED.
+const CURVANCE_MARKET_MGR = '0x1310f352f1389969ece6741671c4b919523912ff'
+
+const CURVANCE_CTOKENS_SEED = [
+  '0x1e240e30e51491546dec3af16b0b4eac8dd110d4',  // cWMON
+  '0xD9E2025b907E95EcC963A5018f56B87575B4aB26',  // caprMON
+  '0x926C101Cf0a3dE8725Eb24a93E980f9FE34d6230',  // cshMON
+  '0x494876051B0E85dCe5ecd5822B1aD39b9660c928',  // csMON
+  '0x5ca6966543c0786f547446234492d2f11c82f11f',  // cgMON
+]
 
 async function fetchCurvance(user: string): Promise<any[]> {
   try {
-    const collateralAddrs = Object.keys(CURVANCE_CTOKENS)
-    const debtAddrs       = Object.keys(CURVANCE_DEBT_CTOKENS)
-    const userPadded      = user.slice(2).toLowerCase().padStart(64, '0')
-    const calls = [
-      ...collateralAddrs.map((addr, i) => ethCall(addr, balanceOfData(user), i)),
-      ...debtAddrs.map((addr, i) => ethCall(addr, '0x21570256' + userPadded, 100 + i)),
-    ]
-    const results = await rpcBatch(calls)
-    const markets: Record<string, { collateral: any[]; debt: any[] }> = {}
-    const allSymbols: string[] = []
+    const userPadded = user.slice(2).toLowerCase().padStart(64, '0')
 
-    collateralAddrs.forEach((addr, i) => {
-      const info   = CURVANCE_CTOKENS[addr]
-      const balRaw = decodeUint(results.find((r: any) => r.id === i)?.result ?? '0x')
-      if (balRaw === 0n) return
-      if (!markets[info.market]) markets[info.market] = { collateral: [], debt: [] }
-      const amount = Number(balRaw) / 1e18
-      markets[info.market].collateral.push({ symbol: info.underlying, amount, amountUSD: 0 })
-      if (!allSymbols.includes(info.underlying)) allSymbols.push(info.underlying)
+    // Get 'entered markets' (collateral-enabled) — may not include deposit-only positions
+    const mgrRes = await rpcBatch([{ jsonrpc: '2.0', id: 0, method: 'eth_call',
+      params: [{ to: CURVANCE_MARKET_MGR, data: '0x53312723' + userPadded }, 'latest'] }])
+    const raw = mgrRes[0]?.result ?? '0x'
+    const enteredMarkets: string[] = []
+    if (raw && raw !== '0x' && raw.length >= 2 + 3 * 64) {
+      const hex   = raw.slice(2)
+      const count = parseInt(hex.slice(64, 128), 16)
+      for (let i = 0; i < count; i++)
+        enteredMarkets.push(('0x' + hex.slice(128 + i * 64 + 24, 128 + i * 64 + 64)).toLowerCase())
+    }
+
+    // Merge seed + entered markets (deduplicated)
+    const seen = new Set<string>()
+    const allCtokens: string[] = []
+    for (const addr of [...CURVANCE_CTOKENS_SEED.map(a => a.toLowerCase()), ...enteredMarkets]) {
+      if (!seen.has(addr)) { seen.add(addr); allCtokens.push(addr) }
+    }
+
+    // balanceOf + symbol + totalAssets + totalSupply for each
+    const calls: any[] = []
+    allCtokens.forEach((addr, i) => {
+      calls.push(ethCall(addr, balanceOfData(user), i * 4))
+      calls.push(ethCall(addr, '0x95d89b41',        i * 4 + 1))  // symbol()
+      calls.push(ethCall(addr, '0x01e1d114',         i * 4 + 2))  // totalAssets()
+      calls.push(ethCall(addr, '0x18160ddd',         i * 4 + 3))  // totalSupply()
     })
-    debtAddrs.forEach((addr, i) => {
-      const info = CURVANCE_DEBT_CTOKENS[addr]
-      const raw  = results.find((r: any) => r.id === 100 + i)?.result ?? '0x'
-      if (!raw || raw === '0x' || raw.length < 2 + 6 * 64) return
-      const hex       = raw.slice(2)
-      const borrowRaw = BigInt('0x' + hex.slice(5 * 64, 6 * 64))
-      if (borrowRaw === 0n) return
-      if (!markets[info.market]) markets[info.market] = { collateral: [], debt: [] }
-      const amount = Number(borrowRaw) / 1e18
-      markets[info.market].debt.push({ symbol: info.underlying, amount, amountUSD: 0 })
-      if (!allSymbols.includes(info.underlying)) allSymbols.push(info.underlying)
+    const results = await rpcBatch(calls)
+    const getR = (n: number) => results.find((r: any) => Number(r.id) === n)?.result ?? '0x'
+
+    const positions: any[] = []
+    const allSymbols: string[] = ['WMON']
+
+    allCtokens.forEach((addr, i) => {
+      const sharesRaw = decodeUint(getR(i * 4))
+      if (sharesRaw === 0n) return
+      const assetsRaw = decodeUint(getR(i * 4 + 2))
+      const supplyRaw = decodeUint(getR(i * 4 + 3))
+      if (supplyRaw === 0n || assetsRaw === 0n) return
+
+      // Decode symbol
+      const symRaw = getR(i * 4 + 1)
+      let symbol = ''
+      if (symRaw && symRaw.length > 66) {
+        try {
+          const hx = symRaw.slice(2)
+          const l  = parseInt(hx.slice(64, 128), 16)
+          symbol   = Buffer.from(hx.slice(128, 128 + l * 2), 'hex').toString('utf8').replace(/\x00/g, '')
+        } catch {}
+      }
+      const underlying = symbol.startsWith('c') ? symbol.slice(1) : (symbol || 'WMON')
+
+      // ERC4626: user assets = (shares / totalSupply) * totalAssets
+      const userAssets = Number(sharesRaw) / Number(supplyRaw) * Number(assetsRaw) / 1e18
+      if (userAssets < 0.001) return
+
+      if (!allSymbols.includes(underlying)) allSymbols.push(underlying)
+      positions.push({ symbol, underlying, userAssets })
     })
-    if (!Object.keys(markets).length) return []
+
+    if (!positions.length) return []
 
     const prices = await getTokenPricesUSD(allSymbols)
-    return Object.entries(markets).map(([marketName, { collateral, debt }]) => {
-      let totalCollateralUSD = 0
-      for (const c of collateral) { c.amountUSD = c.amount * (prices[c.symbol] ?? 0); totalCollateralUSD += c.amountUSD }
-      let totalDebtUSD = 0
-      for (const d of debt) { d.amountUSD = d.amount * (prices[d.symbol] ?? 0); totalDebtUSD += d.amountUSD }
-      const healthFactor = totalDebtUSD > 0 ? (totalCollateralUSD * 0.975) / totalDebtUSD : null
+    const monPrice = prices['WMON'] ?? prices['MON'] ?? 0
+
+    return positions.map(p => {
+      const price     = prices[p.underlying] ?? monPrice
+      const amountUSD = p.userAssets * price
       return {
-        protocol: 'Curvance', type: 'lending', logo: '💎',
-        url: 'https://monad.curvance.com', chain: 'Monad', label: marketName,
-        supply: collateral, borrow: debt, totalCollateralUSD, totalDebtUSD,
-        netValueUSD: totalCollateralUSD - totalDebtUSD, healthFactor,
+        protocol: 'Curvance', type: 'vault', logo: '💎',
+        url: 'https://monad.curvance.com', chain: 'Monad',
+        label: p.symbol || p.underlying, asset: p.underlying,
+        amount: p.userAssets, amountUSD, apy: 0, netValueUSD: amountUSD,
       }
-    })
-  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
+    }).filter(p => p.amountUSD >= 0.01)
+  } catch (e: any) { console.error('[defi] fetchCurvance error:', e?.message ?? String(e)); return [] }
 }
 
 // ─── EULER V2 ─────────────────────────────────────────────────────────────────
