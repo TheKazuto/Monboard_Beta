@@ -576,6 +576,67 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
   } catch (e: any) { console.error('[defi][UniswapV3]', e?.message ?? e); return [] }
 }
 
+// ─── MIDAS (mHYPER, mEDGE on Monad) ──────────────────────────────────────────
+// Midas tokens are USD-denominated yield-bearing ERC-20s.
+// API returns APY; balance via on-chain balanceOf; price ≈ $1 (stable by design).
+const MIDAS_API = 'https://api-prod.midas.app/api/marketplace/products'
+const MIDAS_TOKENS: Array<{ symbol: string; address: string; name: string }> = [
+  { symbol: 'mHYPER', address: '0xd90F6bFEd23fFDE40106FC4498DD2e9EDB95E4e7', name: 'Midas Hyperithm' },
+  { symbol: 'mEDGE',  address: '0x1c8eE940B654bFCeD403f2A44C1603d5be0F50Fa', name: 'Midas mEDGE'     },
+]
+
+async function fetchMidas(user: string): Promise<any[]> {
+  try {
+    // 1. Fetch APYs from Midas API + balances in parallel
+    const [apiRes, balResults] = await Promise.all([
+      fetchThrottled(MIDAS_API, {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+          'Origin': 'https://app.midas.app',
+          'Referer': 'https://app.midas.app/',
+        },
+        signal: AbortSignal.timeout(10_000),
+        cache: 'no-store',
+      }),
+      rpcBatchThrottled(
+        MIDAS_TOKENS.map((t, i) => ethCall(t.address, balanceOfData(user), i + 800))
+      ),
+    ])
+
+    // 2. Build APY map from API response
+    const apyMap: Record<string, number> = {}
+    if (apiRes.ok) {
+      const data = await apiRes.json()
+      for (const p of (data?.products ?? [])) {
+        if (p?.addresses?.['evm:monad']) {
+          apyMap[p.addresses['evm:monad'].toLowerCase()] = Number(p?.apy?.value7d ?? 0) * 100
+        }
+      }
+    }
+
+    // 3. Build positions
+    const positions: any[] = []
+    for (let i = 0; i < MIDAS_TOKENS.length; i++) {
+      const t      = MIDAS_TOKENS[i]
+      const raw    = balResults.find((r: any) => Number(r.id) === i + 800)?.result ?? '0x'
+      const shares = decodeUint(raw)
+      if (shares === 0n) continue
+      const amount    = Number(shares) / 1e18
+      const amountUSD = amount  // price = $1 (USD-denominated)
+      if (amountUSD < 0.01) continue
+      const apy = apyMap[t.address.toLowerCase()] ?? 0
+      positions.push({
+        protocol: 'Midas', type: 'vault', logo: '🏦',
+        url: 'https://app.midas.app', chain: 'Monad',
+        label: t.name, asset: t.symbol,
+        amount, amountUSD, apy, netValueUSD: amountUSD,
+      })
+    }
+    return positions
+  } catch (e: any) { console.error('[defi][Midas]', e?.message ?? e); return [] }
+}
+
 // ─── APR INJECTION ────────────────────────────────────────────────────────────
 type AprLookup = Map<string, number>
 
@@ -675,12 +736,13 @@ async function fetchDefiForAddress(address: string, debugMode: boolean): Promise
 
   // All fetchers in parallel — Zerion replaces 6 on-chain fetchers with 1 HTTP call
   // EulerV2 is now indexed by Zerion — no separate fetcher needed
-  const [zerionR, gearR, upshiftR, lstsR, uniR, pcakeR] =
+  const [zerionR, gearR, upshiftR, lstsR, midasR, uniR, pcakeR] =
     await Promise.allSettled([
       safeFetch('Zerion',        () => fetchZerion(address)),
       safeFetch('Gearbox',       () => fetchGearbox(address, MON_PRICE)),
       safeFetch('Upshift',       () => fetchUpshift(address)),
       safeFetch('MonLSTs',       () => fetchMonLSTs(address, MON_PRICE)),
+      safeFetch('Midas',         () => fetchMidas(address)),
       safeFetch('UniswapV3',     () => fetchUniswapV3(address, 'Uniswap V3',    UNI_NFT_PM, UNI_FACTORY)),
       safeFetch('PancakeswapV3', () => fetchUniswapV3(address, 'PancakeSwap V3', '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364', '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865')),
     ])
@@ -697,7 +759,7 @@ async function fetchDefiForAddress(address: string, debugMode: boolean): Promise
       ['Kintsu',  { status: 'fulfilled', value: lstPositions.filter(p => p.protocol === 'Kintsu')  }],
       ['Magma',   { status: 'fulfilled', value: lstPositions.filter(p => p.protocol === 'Magma')   }],
       ['ShMonad', { status: 'fulfilled', value: lstPositions.filter(p => p.protocol === 'shMonad') }],
-      ['UniswapV3', uniR], ['PancakeswapV3', pcakeR],
+      ['Midas', midasR], ['UniswapV3', uniR], ['PancakeswapV3', pcakeR],
     ]
     return {
       __debug: true, monPrice: MON_PRICE,
@@ -713,7 +775,7 @@ async function fetchDefiForAddress(address: string, debugMode: boolean): Promise
   let allPositions = [
     ...unwrap(zerionR),
     ...unwrap(gearR), ...unwrap(upshiftR), ...lstPositions,
-    ...unwrap(uniR), ...unwrap(pcakeR),
+    ...unwrap(midasR), ...unwrap(uniR), ...unwrap(pcakeR),
   ]
 
   const bestAprsMap = await buildAprLookup()
