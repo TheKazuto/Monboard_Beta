@@ -934,64 +934,43 @@ async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
   try {
     const userPadded = user.slice(2).toLowerCase().padStart(64, '0')
 
-    // Get 'entered markets' (collateral-enabled) — may not include deposit-only positions
-    const mgrRes = await rpcBatch([{ jsonrpc: '2.0', id: 0, method: 'eth_call',
-      params: [{ to: CURVANCE_MARKET_MGR, data: '0x53312723' + userPadded }, 'latest'] }])
-    const raw = mgrRes[0]?.result ?? '0x'
-    const enteredMarkets: string[] = []
-    if (raw && raw !== '0x' && raw.length >= 2 + 3 * 64) {
-      const hex   = raw.slice(2)
-      const count = parseInt(hex.slice(64, 128), 16)
-      for (let i = 0; i < count; i++)
-        enteredMarkets.push(('0x' + hex.slice(128 + i * 64 + 24, 128 + i * 64 + 64)).toLowerCase())
-    }
+    // Use only the seed list — skip market manager to avoid extra RPC round trip
+    // under concurrent load. Seed covers all known Curvance cTokens on Monad.
+    const allCtokens = CURVANCE_CTOKENS_SEED.map(a => a.toLowerCase())
 
-    // Merge seed + entered markets (deduplicated)
-    const seen = new Set<string>()
-    const allCtokens: string[] = []
-    for (const addr of [...CURVANCE_CTOKENS_SEED.map(a => a.toLowerCase()), ...enteredMarkets]) {
-      if (!seen.has(addr)) { seen.add(addr); allCtokens.push(addr) }
-    }
-
-    // balanceOf + symbol + totalAssets + totalSupply for each
+    // balanceOf + totalAssets + totalSupply — skip symbol() to reduce batch size
+    // symbol is decoded from the address lookup table below
     const calls: any[] = []
     allCtokens.forEach((addr, i) => {
-      calls.push(ethCall(addr, balanceOfData(user), i * 4))
-      calls.push(ethCall(addr, '0x95d89b41',        i * 4 + 1))  // symbol()
-      calls.push(ethCall(addr, '0x01e1d114',         i * 4 + 2))  // totalAssets()
-      calls.push(ethCall(addr, '0x18160ddd',         i * 4 + 3))  // totalSupply()
+      calls.push(ethCall(addr, balanceOfData(user), i * 3))
+      calls.push(ethCall(addr, '0x01e1d114',         i * 3 + 1))  // totalAssets()
+      calls.push(ethCall(addr, '0x18160ddd',         i * 3 + 2))  // totalSupply()
     })
-    // Split into chunks of 40 to avoid RPC batch limits under concurrent load
-    const CHUNK = 40
-    const resultsRaw: any[] = []
-    for (let c = 0; c < calls.length; c += CHUNK) {
-      const chunk = await rpcBatch(calls.slice(c, c + CHUNK))
-      resultsRaw.push(...chunk)
-    }
-    const results = resultsRaw
+    // 15 calls total — fast single batch
+    const results = await rpcBatch(calls, 12_000)
     const getR = (n: number) => results.find((r: any) => Number(r.id) === n)?.result ?? '0x'
 
     const positions: any[] = []
     const allSymbols: string[] = ['WMON']
 
+    // Static symbol table for known seed cTokens
+    const CTOKEN_SYMBOLS: Record<string, string> = {
+      '0x1e240e30e51491546dec3af16b0b4eac8dd110d4': 'cWMON',
+      '0xd9e2025b907e95ecc963a5018f56b87575b4ab26': 'caprMON',
+      '0x926c101cf0a3de8725eb24a93e980f9fe34d6230': 'cshMON',
+      '0x494876051b0e85dce5ecd5822b1ad39b9660c928': 'csMON',
+      '0x5ca6966543c0786f547446234492d2f11c82f11f': 'cgMON',
+    }
+
     allCtokens.forEach((addr, i) => {
-      const sharesRaw = decodeUint(getR(i * 4))
+      const sharesRaw = decodeUint(getR(i * 3))
       if (sharesRaw === 0n) return
-      const assetsRaw = decodeUint(getR(i * 4 + 2))
-      const supplyRaw = decodeUint(getR(i * 4 + 3))
+      const assetsRaw = decodeUint(getR(i * 3 + 1))
+      const supplyRaw = decodeUint(getR(i * 3 + 2))
       if (supplyRaw === 0n || assetsRaw === 0n) return
 
-      // Decode symbol
-      const symRaw = getR(i * 4 + 1)
-      let symbol = ''
-      if (symRaw && symRaw.length > 66) {
-        try {
-          const hx = symRaw.slice(2)
-          const l  = parseInt(hx.slice(64, 128), 16)
-          symbol   = Buffer.from(hx.slice(128, 128 + l * 2), 'hex').toString('utf8').replace(/\x00/g, '')
-        } catch {}
-      }
-      const underlying = symbol.startsWith('c') ? symbol.slice(1) : (symbol || 'WMON')
+      const symbol     = CTOKEN_SYMBOLS[addr] ?? 'c' + addr.slice(2, 8)
+      const underlying = symbol.startsWith('c') ? symbol.slice(1) : 'WMON'
 
       // ERC4626: user assets = (shares / totalSupply) * totalAssets
       const userAssets = Number(sharesRaw) / Number(supplyRaw) * Number(assetsRaw) / 1e18
