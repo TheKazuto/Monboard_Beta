@@ -126,21 +126,23 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     const newPositions    = defiRef.current.defiPositions ?? []
     const prevPositions   = prevCached?.totals.defiPositions ?? []
 
-    // Per-protocol preservation: if a protocol was in the previous cache but is
-    // completely absent from the new result, keep its old positions.
-    // This protects against transient per-protocol API failures (e.g. Kuru timeout)
-    // without hiding positions the user legitimately closed.
-    // Stale preserved positions expire naturally when portfolioCache TTL (5 min) resets.
+    // Per-protocol preservation: protect against transient per-protocol failures.
+    // Only preserve cached positions if the cache is fresh (< 2 min old) to avoid
+    // showing closed positions for too long after the user exits a protocol.
+    const cacheAge    = prevCached ? Date.now() - prevCached.fetchedAt : Infinity
+    const cacheRecent = cacheAge < 2 * 60 * 1000
+
     let safePositions: any[]
     if (newPositions.length === 0) {
       // Full failure — keep everything from cache
       safePositions = prevPositions
-    } else if (prevPositions.length > 0) {
-      // Partial result — merge in any protocols missing from new result
+    } else if (prevPositions.length > 0 && cacheRecent) {
+      // Partial result + cache fresh — merge missing protocols
       const newProtos = new Set(newPositions.map((p: any) => p.protocol))
       const preserved = prevPositions.filter((p: any) => !newProtos.has(p.protocol))
       safePositions   = preserved.length > 0 ? [...newPositions, ...preserved] : newPositions
     } else {
+      // Cache stale or no cache — trust fresh API result completely
       safePositions = newPositions
     }
 
