@@ -294,8 +294,18 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isConnected || !address) {
       // Wagmi temporarily lost connection (navigation flicker).
-      // Find the last known address — prefer stableAddrRef over lastAddr
-      const knownAddr = stableAddrRef.current ?? lastAddr.current
+      // Find the last known address — prefer stableAddrRef, then lastAddr.
+      // If both are null (provider just re-mounted), scan portfolioCache for any entry.
+      const knownAddr = stableAddrRef.current
+        ?? lastAddr.current
+        ?? (() => {
+          // Fallback: find any cached address with defi positions
+          for (const [addr, entry] of portfolioCache.entries()) {
+            if (entry.totals.defiPositions.length > 0) return addr
+          }
+          return null
+        })()
+
       if (knownAddr) {
         const cached = portfolioCache.get(knownAddr)
         if (cached) {
@@ -304,6 +314,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
           setStatus('done')
           if (cached.totals.defiPositions.length > 0) {
             defiLoadedRef.current = knownAddr
+            stableAddrRef.current = knownAddr  // re-seed ref so next disconnect works too
           }
           return
         }
