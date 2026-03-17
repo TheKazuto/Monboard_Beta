@@ -961,7 +961,14 @@ async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
       calls.push(ethCall(addr, '0x01e1d114',         i * 4 + 2))  // totalAssets()
       calls.push(ethCall(addr, '0x18160ddd',         i * 4 + 3))  // totalSupply()
     })
-    const results = await rpcBatch(calls)
+    // Split into chunks of 40 to avoid RPC batch limits under concurrent load
+    const CHUNK = 40
+    const resultsRaw: any[] = []
+    for (let c = 0; c < calls.length; c += CHUNK) {
+      const chunk = await rpcBatch(calls.slice(c, c + CHUNK))
+      resultsRaw.push(...chunk)
+    }
+    const results = resultsRaw
     const getR = (n: number) => results.find((r: any) => Number(r.id) === n)?.result ?? '0x'
 
     const positions: any[] = []
