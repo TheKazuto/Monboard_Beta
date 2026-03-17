@@ -126,23 +126,22 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     const newPositions    = defiRef.current.defiPositions ?? []
     const prevPositions   = prevCached?.totals.defiPositions ?? []
 
-    // Per-protocol preservation: protect against transient per-protocol failures.
-    // Only preserve cached positions if the cache is fresh (< 2 min old) to avoid
-    // showing closed positions for too long after the user exits a protocol.
-    const cacheAge    = prevCached ? Date.now() - prevCached.fetchedAt : Infinity
-    const cacheRecent = cacheAge < CACHE_TTL_MS  // preserve within the same cache window (5 min)
-
+    // Per-protocol preservation: always preserve protocols seen this session.
+    // If a protocol returns [] it could be a failure OR a genuine close.
+    // We can't tell the difference — so we keep previously-seen positions until:
+    //   a) the same protocol returns a NON-EMPTY result (proves it's alive, old data stale)
+    //   b) the user reloads the page (portfolioCache resets to empty)
+    // This avoids positions disappearing after the 5-min cache window expires.
     let safePositions: any[]
     if (newPositions.length === 0) {
       // Full failure — keep everything from cache
       safePositions = prevPositions
-    } else if (prevPositions.length > 0 && cacheRecent) {
-      // Partial result + cache fresh — merge missing protocols
+    } else if (prevPositions.length > 0) {
+      // Merge: keep new positions + preserve any protocol missing from new result
       const newProtos = new Set(newPositions.map((p: any) => p.protocol))
       const preserved = prevPositions.filter((p: any) => !newProtos.has(p.protocol))
       safePositions   = preserved.length > 0 ? [...newPositions, ...preserved] : newPositions
     } else {
-      // Cache stale or no cache — trust fresh API result completely
       safePositions = newPositions
     }
 
@@ -164,10 +163,14 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     }
     setTotals(next)
 
-    // Write to cache on final flush OR whenever we have defi positions
-    // (so navigation always finds complete data)
+    // Write to cache on final flush OR whenever we have defi positions.
+    // Only advance fetchedAt if the new result is at least as complete as before —
+    // this prevents a partial fetch result from being stamped as "fresh" and
+    // suppressing re-fetches when protocols are intermittently missing.
     if (final || safePositions.length > 0) {
-      portfolioCache.set(key, { totals: next, fetchedAt: final ? Date.now() : (prevCached?.fetchedAt ?? Date.now()) })
+      const resultComplete = prevPositions.length === 0 || newPositions.length >= prevPositions.length
+      const newFetchedAt   = final && resultComplete ? Date.now() : (prevCached?.fetchedAt ?? Date.now())
+      portfolioCache.set(key, { totals: next, fetchedAt: newFetchedAt })
     }
   }, [])
 
