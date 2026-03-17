@@ -124,9 +124,25 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     // caching an empty defiPositions and making positions disappear on navigation.
     const prevCached      = portfolioCache.get(key)
     const newPositions    = defiRef.current.defiPositions ?? []
-    const safePositions   = newPositions.length > 0
-      ? newPositions
-      : (prevCached?.totals.defiPositions ?? [])
+    const prevPositions   = prevCached?.totals.defiPositions ?? []
+
+    // Per-protocol preservation: if a protocol was in the previous cache but is
+    // completely absent from the new result, keep its old positions.
+    // This protects against transient per-protocol API failures (e.g. Kuru timeout)
+    // without hiding positions the user legitimately closed.
+    // Stale preserved positions expire naturally when portfolioCache TTL (5 min) resets.
+    let safePositions: any[]
+    if (newPositions.length === 0) {
+      // Full failure — keep everything from cache
+      safePositions = prevPositions
+    } else if (prevPositions.length > 0) {
+      // Partial result — merge in any protocols missing from new result
+      const newProtos = new Set(newPositions.map((p: any) => p.protocol))
+      const preserved = prevPositions.filter((p: any) => !newProtos.has(p.protocol))
+      safePositions   = preserved.length > 0 ? [...newPositions, ...preserved] : newPositions
+    } else {
+      safePositions = newPositions
+    }
 
     const next: PortfolioTotals = {
       tokenValueUSD:       t,
