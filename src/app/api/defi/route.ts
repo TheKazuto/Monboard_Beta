@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { MONAD_RPC as RPC, rpcBatch, getMonPrice } from '@/lib/monad'
+import { rpcBatch, getMonPrice } from '@/lib/monad'
 import { getAllPrices } from '@/lib/priceCache'
 import { getAprEntries } from '@/lib/aprCache'
 
@@ -21,28 +21,35 @@ function decodeAddress(hex: string): string {
   return '0x' + hex.slice(2).slice(-40)
 }
 
-// ─── RPC semaphore ───────────────────────────────────────────────────────────
-// Limits concurrent connections to rpc.monad.xyz to MAX_RPC_CONCURRENT.
-// When 12+ fetchers run in parallel they all fire rpcBatch simultaneously,
-// causing connection failures / rate limits. The semaphore serializes them.
-const MAX_RPC_CONCURRENT = 3
-let rpcActive = 0
-const rpcQueue: Array<() => void> = []
+// ─── Subrequest semaphores ───────────────────────────────────────────────────
+// Cloudflare Workers allows max 6 CONCURRENT subrequests per request.
+// We split the budget: 2 for RPC + 4 for outbound HTTP = 6 total.
+// All fetcher functions must use rpcBatchThrottled / fetchThrottled.
 
-function rpcAcquire(): Promise<void> {
-  if (rpcActive < MAX_RPC_CONCURRENT) { rpcActive++; return Promise.resolve() }
-  return new Promise(resolve => rpcQueue.push(() => { rpcActive++; resolve() }))
+function makeSemaphore(max: number) {
+  let active = 0
+  const queue: Array<() => void> = []
+  const acquire = (): Promise<void> => {
+    if (active < max) { active++; return Promise.resolve() }
+    return new Promise(resolve => queue.push(() => { active++; resolve() }))
+  }
+  const release = (): void => { active--; const next = queue.shift(); if (next) next() }
+  return { acquire, release }
 }
-function rpcRelease(): void {
-  rpcActive--
-  const next = rpcQueue.shift()
-  if (next) next()
-}
+
+const rpcSem  = makeSemaphore(2)  // max 2 concurrent RPC connections
+const httpSem = makeSemaphore(4)  // max 4 concurrent outbound HTTP calls
 
 async function rpcBatchThrottled(calls: object[], timeoutMs = 15_000): Promise<any[]> {
-  await rpcAcquire()
+  await rpcSem.acquire()
   try { return await rpcBatch(calls, timeoutMs) }
-  finally { rpcRelease() }
+  finally { rpcSem.release() }
+}
+
+async function fetchThrottled(url: string, init?: RequestInit): Promise<Response> {
+  await httpSem.acquire()
+  try { return await fetch(url, init) }
+  finally { httpSem.release() }
 }
 
 // ─── Token info resolver ──────────────────────────────────────────────────────
@@ -214,7 +221,7 @@ async function fetchMorpho(user: string): Promise<any[]> {
   // Step 1: fetch vault list from Morpho API
   let apiVaults: Array<{ address: string; name: string; symbol: string; assetSymbol: string; assetDecimals: number; apy: number }> = []
   try {
-    const res = await fetch(MORPHO_API_URL, {
+    const res = await fetchThrottled(MORPHO_API_URL, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query: `query{vaults(first:100,where:{chainId_in:[143]}){items{address name symbol asset{symbol decimals} state{netApy}}}}` }),
       signal: AbortSignal.timeout(10_000), cache: 'no-store',
@@ -425,7 +432,7 @@ async function fetchCurve(user: string): Promise<any[]> {
 
   const poolResults = await Promise.allSettled(
     ['factory-twocrypto', 'factory-stable-ng'].map(t =>
-      fetch(`${BASE}/getPools/monad/${t}`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
+      fetchThrottled(`${BASE}/getPools/monad/${t}`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
         .then(r => r.ok ? r.json() : null).catch(() => null)
     )
   )
@@ -492,7 +499,7 @@ const GEARBOX_TOKEN_MAP: Record<string, { token: string; isStable: boolean }> = 
 
 async function fetchGearbox(user: string, monPrice: number): Promise<any[]> {
   try {
-    const res = await fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
+    const res = await fetchThrottled(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
     if (!res.ok) return []
     const data = await res.json()
     const pools = (data?.markets ?? [])
@@ -557,7 +564,7 @@ function upshiftTokenFromName(name: string): string {
 
 async function fetchUpshift(user: string): Promise<any[]> {
   try {
-    const res = await fetch('https://api.upshift.finance/metrics/vaults_summary', {
+    const res = await fetchThrottled('https://api.upshift.finance/metrics/vaults_summary', {
       headers: UPSHIFT_API_HEADERS, signal: AbortSignal.timeout(10_000), cache: 'no-store',
     })
     if (!res.ok) return []
@@ -639,7 +646,7 @@ async function fetchMonLSTs(user: string, monPrice: number): Promise<any[]> {
 async function fetchLagoon(user: string): Promise<any[]> {
   const paddedAddr = user.slice(2).toLowerCase().padStart(64, '0')
   try {
-    const res = await fetch(
+    const res = await fetchThrottled(
       'https://app.lagoon.finance/api/vaults?chainId=143&underlyingassetSymbol=0&curatorId=0&pageIndex=0&pageSize=50&includeApr=true',
       {
         signal: AbortSignal.timeout(8_000), cache: 'no-store',
@@ -709,7 +716,7 @@ async function fetchKuru(user: string): Promise<any[]> {
     type VaultMeta = { address: string; name: string; base: string; quote: string; quoteDec: number }
     let apiMetas: VaultMeta[] = []
     try {
-      const apiRes = await fetch(KURU_API, { signal: AbortSignal.timeout(8_000), cache: 'no-store', headers: KURU_HEADERS })
+      const apiRes = await fetchThrottled(KURU_API, { signal: AbortSignal.timeout(8_000), cache: 'no-store', headers: KURU_HEADERS })
       if (apiRes.ok) {
         const apiData  = await apiRes.json()
         const vaultList = apiData?.data?.data ?? apiData?.data ?? []
@@ -863,7 +870,7 @@ async function fetchEulerV2(user: string): Promise<any[]> {
     }
   }`
   try {
-    const res = await fetch('https://api.euler.finance/graphql', {
+    const res = await fetchThrottled('https://api.euler.finance/graphql', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, variables: { account: user.toLowerCase(), chainId: 143 } }),
       signal: AbortSignal.timeout(10_000), cache: 'no-store',
@@ -889,6 +896,15 @@ async function fetchEulerV2(user: string): Promise<any[]> {
       })
   } catch (e: any) { console.error('[defi][EulerV2]', e?.message ?? e); return [] }
 }
+
+// ─── Server-side cache per address ──────────────────────────────────────────
+// Mirrors the best-aprs pattern: cache the full result for 3 minutes.
+// Subsequent requests for the same address are served instantly (0 subrequests).
+// The first request may still have partial failures, but the PortfolioContext
+// preservation layer handles those gracefully until the cache warms up.
+const DEFI_CACHE_TTL = 3 * 60 * 1000
+interface DefiCacheEntry { result: any; fetchedAt: number; promise: Promise<any> | null }
+const defiCache = new Map<string, DefiCacheEntry>()
 
 // ─── APR INJECTION ────────────────────────────────────────────────────────────
 type AprLookup = Map<string, number>
@@ -924,7 +940,7 @@ async function fetchMerklAprs(): Promise<AprLookup> {
   if (merklAprCache && Date.now() - merklAprCache.ts < MERKL_TTL) return merklAprCache.map
   try {
     const pages = await Promise.all([1, 2, 3].map(page =>
-      fetch(`${MERKL_BASE}&page=${page}`, {
+      fetchThrottled(`${MERKL_BASE}&page=${page}`, {
         signal: AbortSignal.timeout(12_000), cache: 'no-store',
         headers: { 'Accept': 'application/json' },
       }).then(r => r.ok ? r.json() : null).catch(() => null)
@@ -974,24 +990,15 @@ function injectBestAprs(positions: any[], map: AprLookup): any[] {
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
-export async function GET(req: NextRequest) {
-  const address = req.nextUrl.searchParams.get('address')
-  if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
-    return NextResponse.json({ error: 'Invalid address' }, { status: 400 })
-  }
-  const debugMode = req.nextUrl.searchParams.get('debug') === '1'
-
+async function fetchDefiForAddress(address: string, debugMode: boolean): Promise<any> {
   const [monPriceR] = await Promise.allSettled([getMonPrice()])
   const MON_PRICE   = monPriceR.status === 'fulfilled' ? (monPriceR.value as number) : 0
 
-  async function safeFetch(name: string, fn: () => Promise<any[]>): Promise<any[]> {
-    try {
-      return await fn()
-    } catch (e: any) {
+  function safeFetch(name: string, fn: () => Promise<any[]>): Promise<any[]> {
+    return fn().catch((e: any) => {
       console.error(`[defi][${name}]`, e?.message ?? e)
-      if (debugMode) return [{ __debugError: true, protocol: name, error: e?.message ?? String(e), stack: (e?.stack ?? '').slice(0, 400) }]
       return []
-    }
+    })
   }
 
   const [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, lstsR, lagoonR, kuruR, curvanceR, eulerR] =
@@ -1014,13 +1021,12 @@ export async function GET(req: NextRequest) {
     return r.status === 'fulfilled' ? r.value : []
   }
 
-  // Split MonLSTs back into individual protocols for display
   const lstPositions = unwrap(lstsR)
-  const kintsuR_pos  = lstPositions.filter(p => p.protocol === 'Kintsu')
-  const magmaR_pos   = lstPositions.filter(p => p.protocol === 'Magma')
-  const shmonadR_pos = lstPositions.filter(p => p.protocol === 'shMonad')
 
   if (debugMode) {
+    const kintsuR_pos  = lstPositions.filter(p => p.protocol === 'Kintsu')
+    const magmaR_pos   = lstPositions.filter(p => p.protocol === 'Magma')
+    const shmonadR_pos = lstPositions.filter(p => p.protocol === 'shMonad')
     const named: [string, PromiseSettledResult<any[]>][] = [
       ['Neverland', nevR], ['Morpho', morphoR], ['UniswapV3', uniR], ['PancakeswapV3', pcakeR],
       ['Curve', curveR], ['Gearbox', gearR], ['Upshift', upshiftR],
@@ -1029,7 +1035,7 @@ export async function GET(req: NextRequest) {
       ['ShMonad', { status: 'fulfilled', value: shmonadR_pos }],
       ['Lagoon', lagoonR], ['Kuru', kuruR], ['Curvance', curvanceR], ['EulerV2', eulerR],
     ]
-    return NextResponse.json({
+    return {
       __debug: true, monPrice: MON_PRICE,
       fetchers: named.map(([name, r]) => ({
         name, status: r.status,
@@ -1037,7 +1043,7 @@ export async function GET(req: NextRequest) {
         positions: r.status === 'fulfilled' ? r.value : [],
         error:     r.status === 'rejected'  ? String(r.reason) : null,
       })),
-    })
+    }
   }
 
   let allPositions = [
@@ -1054,8 +1060,63 @@ export async function GET(req: NextRequest) {
   const totalSupplyUSD   = allPositions.reduce((s, p) => s + (p.totalCollateralUSD ?? p.amountUSD ?? 0), 0)
   const activeProtocols  = [...new Set(allPositions.map(p => p.protocol))]
 
-  return NextResponse.json({
+  return {
     positions: allPositions,
     summary: { totalNetValueUSD, totalDebtUSD, totalSupplyUSD, netValueUSD: totalNetValueUSD, activeProtocols, monPrice: MON_PRICE },
-  })
+  }
+}
+
+export async function GET(req: NextRequest) {
+  const address = req.nextUrl.searchParams.get('address')
+  if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+    return NextResponse.json({ error: 'Invalid address' }, { status: 400 })
+  }
+  const debugMode = req.nextUrl.searchParams.get('debug') === '1'
+  const key       = address.toLowerCase()
+
+  // Debug mode always bypasses cache
+  if (!debugMode) {
+    const entry = defiCache.get(key)
+    const now   = Date.now()
+
+    // Serve from cache if fresh
+    if (entry && !entry.promise && now - entry.fetchedAt < DEFI_CACHE_TTL) {
+      return NextResponse.json(entry.result)
+    }
+
+    // Deduplicate in-flight requests for the same address
+    if (entry?.promise) {
+      try {
+        const result = await entry.promise
+        return NextResponse.json(result)
+      } catch {
+        // fall through to retry
+      }
+    }
+  }
+
+  // Execute fetchers and cache result
+  const promise = fetchDefiForAddress(address, debugMode)
+
+  if (!debugMode) {
+    const existing = defiCache.get(key)
+    defiCache.set(key, { result: existing?.result ?? null, fetchedAt: existing?.fetchedAt ?? 0, promise })
+  }
+
+  try {
+    const result = await promise
+    if (!debugMode) {
+      defiCache.set(key, { result, fetchedAt: Date.now(), promise: null })
+    }
+    return NextResponse.json(result)
+  } catch (e: any) {
+    if (!debugMode) {
+      const existing = defiCache.get(key)
+      if (existing) defiCache.set(key, { ...existing, promise: null })
+      // Serve stale cache on error rather than empty response
+      if (existing?.result) return NextResponse.json(existing.result)
+    }
+    console.error('[defi] fatal error:', e?.message ?? e)
+    return NextResponse.json({ error: 'Failed to fetch DeFi positions' }, { status: 500 })
+  }
 }
