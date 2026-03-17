@@ -338,7 +338,7 @@ export default function LandingPage() {
           <a href="/landing" className="land-logo">
             <div className="land-logo-dot" style={{ padding: 0, overflow: 'hidden' }}>
               <img src="/monboard.png" alt="MonBoard" width={32} height={32} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-            </div>Mon<span style={{ color: '#836EF9' }}>Board</span>
+            </div><span style={{ color: 'var(--land-text)' }}>Mon</span><span style={{ color: '#836EF9' }}>Board</span>
           </a>
           <Link href="/dashboard" className="btn-launch">
             Launch Dashboard <span>→</span>
