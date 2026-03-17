@@ -738,15 +738,6 @@ const CURVANCE_DEBT_CTOKENS: Array<{ addr: string; symbol: string; underlying: s
 ]
 const CURVANCE_MARKET_MGR  = '0x1310f352f1389969ece6741671c4b919523912ff'
 const CURVANCE_BORROW_SEL  = '0x11005b07'  // borrowDebt(address) → uint256 in asset decimals
-const CURVANCE_ORACLE_SEL  = '0x5b07871a'  // getAssetPrice(address) → uint256 (18dp USD)
-// Underlying asset addresses for oracle price lookup
-const CURVANCE_ASSET_ADDRS: Record<string, string> = {
-  WMON:   '0x3bd359c1119da7da1d913d1c4d2b7c461115433a',
-  aprMON: '0xa3227c5969757783154c60bf0bc1944180ed81b9',  // sMON proxy
-  shMON:  '0x1b68626dca36c7fe922fd2d55e4f631d962de19c',
-  sMON:   '0xa3227c5969757783154c60bf0bc1944180ed81b9',
-  gMON:   '0x8498312a6b3cbd158bf0c93abdcf29e6e4f55081',
-}
 
 async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
   try {
@@ -766,24 +757,11 @@ async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
     CURVANCE_DEBT_CTOKENS.forEach(ct => {
       calls.push(ethCall(ct.addr, CURVANCE_BORROW_SEL + upad, id++))
     })
-    // Oracle prices for non-stable underlyings (Curvance internal oracle)
-    const oracleStartId = id
-    const uniqueNonStable = [...new Set(CURVANCE_SUPPLY_CTOKENS.filter(ct => !STABLES.has(ct.underlying)).map(ct => ct.underlying))]
-    uniqueNonStable.forEach(sym => {
-      const assetAddr = CURVANCE_ASSET_ADDRS[sym]
-      if (assetAddr) calls.push(ethCall(CURVANCE_MARKET_MGR, CURVANCE_ORACLE_SEL + assetAddr.slice(2).toLowerCase().padStart(64, '0'), id++))
-    })
-
     const results = await rpcBatch(calls, 12_000)
     const getR = (n: number) => results.find((r: any) => Number(r.id) === n)?.result ?? '0x'
 
-    // Build oracle price map — 18dp → USD (use Curvance's own price feed for accuracy)
-    const oraclePrices: Record<string, number> = {}
-    uniqueNonStable.forEach((sym, i) => {
-      const raw = decodeUint(getR(oracleStartId + i))
-      if (raw > 0n) oraclePrices[sym] = Number(raw) / 1e18
-    })
-    const price = (sym: string): number => STABLES.has(sym) ? 1 : (oraclePrices[sym] ?? monPrice ?? 0.024)
+    // Price: stables = $1, everything else = monPrice from CoinGecko
+    const price = (sym: string): number => STABLES.has(sym) ? 1 : (monPrice || 0.024)
 
     const supplyItems: Array<{ symbol: string; underlying: string; amount: number; amountUSD: number }> = []
     const borrowItems: Array<{ symbol: string; underlying: string; amount: number; amountUSD: number }> = []
