@@ -419,10 +419,10 @@ export default function LandingPage() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1rem' }}>
             {FEATURES.map(({ icon, title, desc, tag }) => (
               <div key={title} className="feat-card">
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.875rem' }}>
-                  <img src={icon} alt={title} style={{ width: '64px', height: '64px', objectFit: 'contain' }} />
+                <div style={{ marginBottom: '1rem' }}>
                   <span className="tag">{tag}</span>
                 </div>
+                <img src={icon} alt={title} style={{ width: '100%', height: '160px', objectFit: 'cover', borderRadius: '12px', marginBottom: '1.25rem' }} />
                 <h3 style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: '1.05rem', marginBottom: '0.5rem' }}>
                   {title}
                 </h3>
