@@ -38,13 +38,13 @@ const FEATURES = [
   {
     icon: '📊',
     title: 'DeFi Positions',
-    desc: 'All your active positions across 14+ Monad protocols (liquidity pools, lending, staking) in one view.',
+    desc: 'All your active positions across 14+ Monad protocols — liquidity pools, lending, staking — in one view.',
     tag: '14+ protocols',
   },
   {
     icon: '🔥',
     title: 'Best APRs',
-    desc: 'Real-time yield opportunities aggregated from every major Monad protocol.',
+    desc: 'Real-time yield opportunities aggregated from every major Monad protocol. No hardcoded values.',
     tag: 'Real-time',
   },
   {
@@ -338,7 +338,7 @@ export default function LandingPage() {
           <a href="/landing" className="land-logo">
             <div className="land-logo-dot" style={{ padding: 0, overflow: 'hidden' }}>
               <img src="/monboard.png" alt="MonBoard" width={32} height={32} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-            </div><span style={{ color: 'var(--land-text)' }}>Mon</span><span style={{ color: '#836EF9' }}>Board</span>
+            </div><span>Mon<span style={{ color: '#836EF9' }}>Board</span></span>
           </a>
           <Link href="/dashboard" className="btn-launch">
             Launch Dashboard <span>→</span>
@@ -367,7 +367,7 @@ export default function LandingPage() {
             </h1>
 
             <p className="reveal d3" style={{ fontSize: 'clamp(1rem, 2.5vw, 1.2rem)', color: 'var(--land-muted)', lineHeight: 1.7, maxWidth: '580px', margin: '0 auto 2.5rem' }}>
-              Track tokens, DeFi positions, NFTs and transaction history across the entire Monad ecosystem in one clean, real-time dashboard.
+              Track tokens, DeFi positions, NFTs and transaction history across the entire Monad ecosystem — in one clean, real-time dashboard. Free forever.
             </p>
 
             <div className="reveal d4" style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -412,7 +412,7 @@ export default function LandingPage() {
             <span className="tag" style={{ marginBottom: '1rem', display: 'inline-block' }}>Features</span>
             <h2 className="land-h2">Everything you need to navigate Monad</h2>
             <p style={{ color: 'var(--land-muted)', marginTop: '0.75rem', maxWidth: '520px', margin: '0.75rem auto 0' }}>
-              From portfolio tracking to yield hunting, all your on-chain activity organized.
+              From portfolio tracking to yield hunting — all your on-chain activity, organized.
             </p>
           </div>
 
@@ -439,7 +439,7 @@ export default function LandingPage() {
             <span className="tag" style={{ marginBottom: '0.75rem', display: 'inline-block' }}>Integrations</span>
             <h2 className="land-h2">The whole Monad ecosystem, connected</h2>
             <p style={{ color: 'var(--land-muted)', marginTop: '0.5rem', fontSize: '0.95rem' }}>
-              Live data from every major protocol.
+              Live data from every major protocol — no hardcoded values, ever.
             </p>
           </div>
 
@@ -464,7 +464,7 @@ export default function LandingPage() {
                 <span className="grad-text">By Shinka Labs.</span>
               </h2>
               <p style={{ color: 'var(--land-muted)', lineHeight: 1.75, fontSize: '0.95rem' }}>
-                MonBoard is crafted specifically for the Monad ecosystem, not a generic multi-chain dashboard with Monad added as an afterthought. Every integration is native, every data point is live, and every feature is designed around how Monad actually works.
+                MonBoard is crafted specifically for the Monad ecosystem — not a generic multi-chain dashboard with Monad added as an afterthought. Every integration is native, every data point is live, and every feature is designed around how Monad actually works.
               </p>
               <div style={{ marginTop: '1.75rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
                 <Link href="/dashboard" className="btn-launch">Open dashboard →</Link>
@@ -482,7 +482,7 @@ export default function LandingPage() {
                 'Cross-chain swaps built in',
                 'Security scanner for approvals',
                 'Portfolio history up to 1 year',
-                'The main DeFi tools in one place',
+                'Fully free, no wallet required to browse',
                 'Dark mode & mobile responsive',
               ].map(item => (
                 <div key={item} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', padding: '0.75rem 1rem', background: 'var(--land-card)', borderRadius: '10px', border: '1px solid var(--land-border)' }}>
@@ -506,7 +506,7 @@ export default function LandingPage() {
             Start tracking your Monad portfolio today
           </h2>
           <p style={{ color: 'var(--land-muted)', marginBottom: '2.5rem', fontSize: '1rem' }}>
-            No sign-up. Just connect your wallet.
+            Free forever. No sign-up. Just connect your wallet.
           </p>
           <Link href="/dashboard" className="btn-launch btn-launch-lg">
             Launch Dashboard →
@@ -518,7 +518,7 @@ export default function LandingPage() {
           <p>
             Built by{' '}
             <a href="https://www.shinkalabs.tech/" target="_blank" rel="noopener noreferrer">Shinka Labs</a>
-            {' '}· MonBoard ·{' '}
+            {' '}· MonBoard 🟣 ·{' '}
             <a href="https://t.me/ShinkaLabs" target="_blank" rel="noopener noreferrer">Telegram</a>
             {' '}·{' '}
             <a href="https://x.com/XShinkaLabsX" target="_blank" rel="noopener noreferrer">Twitter</a>
