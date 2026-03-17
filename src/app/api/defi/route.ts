@@ -120,6 +120,7 @@ async function fetchZerion(user: string): Promise<any[]> {
     }
   }
   if (!res || !res.ok) { console.error('[defi][Zerion] all retries exhausted'); return [] }
+  try {
     const data = await res.json()
     const raw: any[] = data?.data ?? []
     if (!raw.length) return []
@@ -203,7 +204,7 @@ async function fetchZerion(user: string): Promise<any[]> {
       }
     }
     return positions
-  } catch (e: any) { console.error('[defi][Zerion]', e?.message ?? e); return [] }
+  } catch (e: any) { console.error('[defi][Zerion] parse error', e?.message ?? e); return [] }
 }
 
 // ─── MON LSTs: Magma + shMonad (not indexed by Zerion) ───────────────────────
