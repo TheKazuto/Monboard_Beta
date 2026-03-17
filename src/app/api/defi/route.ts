@@ -91,16 +91,35 @@ function zerionProtoUrl(proto: string, appUrl: string): string {
 }
 
 async function fetchZerion(user: string): Promise<any[]> {
-  try {
-    const res = await fetchThrottled(
-      `${ZERION_API}/${user}/positions/?filter[positions]=only_complex&filter[chain_ids]=monad&sort=value`,
-      {
-        headers: { 'Accept': 'application/json', 'Authorization': ZERION_AUTH() },
-        signal: AbortSignal.timeout(12_000),
-        cache: 'no-store',
+  const MAX_RETRIES = 3
+  const RETRY_DELAY = 1_000  // 1 second between retries
+
+  let res: Response | null = null
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      res = await fetchThrottled(
+        `${ZERION_API}/${user}/positions/?filter[positions]=only_complex&filter[chain_ids]=monad&sort=value`,
+        {
+          headers: { 'Accept': 'application/json', 'Authorization': ZERION_AUTH() },
+          signal: AbortSignal.timeout(12_000),
+          cache: 'no-store',
+        }
+      )
+      // 429 = rate limit → retry; any other non-ok → fail immediately
+      if (res.status === 429) {
+        console.warn(`[defi][Zerion] rate limited (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY}ms`)
+        if (attempt < MAX_RETRIES) await new Promise(r => setTimeout(r, RETRY_DELAY))
+        continue
       }
-    )
-    if (!res.ok) { console.error('[defi][Zerion] HTTP', res.status); return [] }
+      if (!res.ok) { console.error('[defi][Zerion] HTTP', res.status); return [] }
+      break  // success
+    } catch (err: any) {
+      console.warn(`[defi][Zerion] attempt ${attempt}/${MAX_RETRIES} failed: ${err?.message}`)
+      if (attempt < MAX_RETRIES) await new Promise(r => setTimeout(r, RETRY_DELAY))
+      else return []
+    }
+  }
+  if (!res || !res.ok) { console.error('[defi][Zerion] all retries exhausted'); return [] }
     const data = await res.json()
     const raw: any[] = data?.data ?? []
     if (!raw.length) return []
