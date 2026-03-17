@@ -21,6 +21,30 @@ function decodeAddress(hex: string): string {
   return '0x' + hex.slice(2).slice(-40)
 }
 
+// ─── RPC semaphore ───────────────────────────────────────────────────────────
+// Limits concurrent connections to rpc.monad.xyz to MAX_RPC_CONCURRENT.
+// When 12+ fetchers run in parallel they all fire rpcBatch simultaneously,
+// causing connection failures / rate limits. The semaphore serializes them.
+const MAX_RPC_CONCURRENT = 3
+let rpcActive = 0
+const rpcQueue: Array<() => void> = []
+
+function rpcAcquire(): Promise<void> {
+  if (rpcActive < MAX_RPC_CONCURRENT) { rpcActive++; return Promise.resolve() }
+  return new Promise(resolve => rpcQueue.push(() => { rpcActive++; resolve() }))
+}
+function rpcRelease(): void {
+  rpcActive--
+  const next = rpcQueue.shift()
+  if (next) next()
+}
+
+async function rpcBatchThrottled(calls: object[], timeoutMs = 15_000): Promise<any[]> {
+  await rpcAcquire()
+  try { return await rpcBatch(calls, timeoutMs) }
+  finally { rpcRelease() }
+}
+
 // ─── Token info resolver ──────────────────────────────────────────────────────
 interface TokenInfo { symbol: string; decimals: number }
 
@@ -56,7 +80,7 @@ async function resolveTokens(addresses: string[]): Promise<Record<string, TokenI
       calls.push(ethCall(addr, '0x95d89b41', i * 2))
       calls.push(ethCall(addr, '0x313ce567', i * 2 + 1))
     })
-    const results = await rpcBatch(calls).catch(() => [] as any[])
+    const results = await rpcBatchThrottled(calls).catch(() => [] as any[])
     unknown.forEach((addr, i) => {
       const symRaw   = results.find((r: any) => r.id === i * 2)?.result     ?? ''
       const decRaw   = results.find((r: any) => r.id === i * 2 + 1)?.result ?? ''
@@ -116,7 +140,7 @@ async function fetchNeverland(user: string): Promise<any[]> {
       ethCall(NEVERLAND_POOL, '0x35ea6a75' + a.address.slice(2).toLowerCase().padStart(64, '0'), i)
     )
     reserveCalls.push(ethCall(NEVERLAND_POOL, '0xbf92857c' + paddedUser, 999))
-    const reserveResults = await rpcBatch(reserveCalls)
+    const reserveResults = await rpcBatchThrottled(reserveCalls)
 
     const discovered: Array<{ underlying: typeof NEVERLAND_UNDERLYING[0]; aToken: string; debtToken: string }> = []
     for (let i = 0; i < NEVERLAND_UNDERLYING.length; i++) {
@@ -148,7 +172,7 @@ async function fetchNeverland(user: string): Promise<any[]> {
       balCalls.push(ethCall(aToken,    balanceOfData(user), i * 2))
       balCalls.push(ethCall(debtToken, balanceOfData(user), i * 2 + 1))
     })
-    const balResults = await rpcBatch(balCalls)
+    const balResults = await rpcBatchThrottled(balCalls)
     const prices     = await getTokenPricesUSD(discovered.map(d => d.underlying.symbol))
 
     const supplyList: Array<{ symbol: string; amount: number; amountUSD: number }> = []
@@ -224,7 +248,7 @@ async function fetchMorpho(user: string): Promise<any[]> {
     calls.push(ethCall(addr, '0x18160ddd',         i * 4 + 2))  // totalSupply()
     calls.push(ethCall(addr, '0x38d52e0f',         i * 4 + 3))  // asset()
   })
-  const results = await rpcBatch(calls, 12_000)
+  const results = await rpcBatchThrottled(calls, 12_000)
   const getR = (n: number) => results.find((r: any) => Number(r.id) === n)?.result ?? '0x'
 
   const positions: any[] = []
@@ -297,18 +321,18 @@ function calcV3Amounts(
 
 async function fetchUniswapV3(user: string, protocol: string, nftPM: string, factory: string): Promise<any[]> {
   try {
-    const balRes   = await rpcBatch([ethCall(nftPM, balanceOfData(user), 1)])
+    const balRes   = await rpcBatchThrottled([ethCall(nftPM, balanceOfData(user), 1)])
     const nftCount = Number(decodeUint(balRes[0]?.result ?? '0x'))
     if (nftCount === 0) return []
 
     const limit     = Math.min(nftCount, 20)
     const idCalls   = Array.from({ length: limit }, (_, i) => ethCall(nftPM, tokenOfOwnerByIndex(user, BigInt(i)), i + 10))
-    const idResults = await rpcBatch(idCalls)
+    const idResults = await rpcBatchThrottled(idCalls)
     const tokenIds  = idResults.map((r: any) => decodeUint(r?.result ?? '0x')).filter((id: bigint) => id > 0n)
     if (!tokenIds.length) return []
 
     const posCalls   = tokenIds.map((id: bigint, i: number) => ethCall(nftPM, positionsData(id), i + 200))
-    const posResults = await rpcBatch(posCalls)
+    const posResults = await rpcBatchThrottled(posCalls)
 
     const tokenAddresses = new Set<string>()
     const parsedPositions: Array<{ token0: string; token1: string; fee: number; tickLower: number; tickUpper: number; liquidity: bigint }> = []
@@ -347,7 +371,7 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
       pcIdx++
     }
 
-    const poolAddrResults = await rpcBatch(poolCalls)
+    const poolAddrResults = await rpcBatchThrottled(poolCalls)
     const slot0Calls: object[] = []
     const slot0Meta: Record<number, any> = {}
     let s0Idx = 600
@@ -362,7 +386,7 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
     }
     if (!slot0Calls.length) return []
 
-    const slot0Results = await rpcBatch(slot0Calls)
+    const slot0Results = await rpcBatchThrottled(slot0Calls)
     const allSymbols = [...new Set(Object.values(slot0Meta).flatMap((m: any) => [m.t0sym, m.t1sym]))]
     const prices     = await getTokenPricesUSD(allSymbols)
 
@@ -420,7 +444,7 @@ async function fetchCurve(user: string): Promise<any[]> {
       params: [{ to: pool.lpTokenAddress ?? pool.address, data: '0x70a08231' + paddedAddr }, 'latest'],
     }))
     try {
-      const res = await rpcBatch(calls, 12_000)
+      const res = await rpcBatchThrottled(calls, 12_000)
       rpcResults.push(...res)
     } catch { /* chunk failed — skip */ }
   }
@@ -477,7 +501,7 @@ async function fetchGearbox(user: string, monPrice: number): Promise<any[]> {
     if (!pools.length) return []
 
     const calls   = pools.map((p: any, i: number) => ethCall(p.baseParams.addr, balanceOfData(user), i + 200))
-    const results = await rpcBatch(calls)
+    const results = await rpcBatchThrottled(calls)
 
     const positions: any[] = []
     for (let i = 0; i < pools.length; i++) {
@@ -547,13 +571,13 @@ async function fetchUpshift(user: string): Promise<any[]> {
     if (!vaults.length) return []
 
     // Resolve share tokens in one batch
-    const shareTokenResults = await rpcBatch(vaults.map((v: any, i: number) => ethCall(v.address, UPSHIFT_SHARE_TOKEN_SEL, i)))
+    const shareTokenResults = await rpcBatchThrottled(vaults.map((v: any, i: number) => ethCall(v.address, UPSHIFT_SHARE_TOKEN_SEL, i)))
     const shareTokenAddrs = vaults.map((v: any, i: number) => {
       const addr = decodeAddress(shareTokenResults.find((x: any) => Number(x.id) === i)?.result ?? '')
       return (addr && addr !== '0x0000000000000000000000000000000000000000') ? addr : v.address.toLowerCase()
     })
 
-    const results = await rpcBatch(shareTokenAddrs.map((addr: string, i: number) => ethCall(addr, balanceOfData(user), i + 700)))
+    const results = await rpcBatchThrottled(shareTokenAddrs.map((addr: string, i: number) => ethCall(addr, balanceOfData(user), i + 700)))
 
     const positions: any[] = []
     for (let i = 0; i < vaults.length; i++) {
@@ -586,7 +610,7 @@ const MON_LSTS = [
 async function fetchMonLSTs(user: string, monPrice: number): Promise<any[]> {
   try {
     // Step 1: balanceOf for all three in one batch
-    const balResults = await rpcBatch(MON_LSTS.map((lst, i) => ethCall(lst.addr, balanceOfData(user), i)))
+    const balResults = await rpcBatchThrottled(MON_LSTS.map((lst, i) => ethCall(lst.addr, balanceOfData(user), i)))
     const withBalance = MON_LSTS.map((lst, i) => ({
       ...lst,
       shares: decodeUint(balResults.find((r: any) => Number(r.id) === i)?.result ?? '0x'),
@@ -595,7 +619,7 @@ async function fetchMonLSTs(user: string, monPrice: number): Promise<any[]> {
     if (!withBalance.length) return []
 
     // Step 2: previewRedeem only for LSTs with balance
-    const redeemResults = await rpcBatch(withBalance.map((lst, i) =>
+    const redeemResults = await rpcBatchThrottled(withBalance.map((lst, i) =>
       ethCall(lst.addr, lst.redeemSel + lst.shares.toString(16).padStart(64, '0'), i + 10)
     ))
 
@@ -632,7 +656,7 @@ async function fetchLagoon(user: string): Promise<any[]> {
       ethCall(v.address, '0x01e1d114', i * 3 + 1),
       ethCall(v.address, '0x18160ddd', i * 3 + 2),
     ])
-    const results = await rpcBatch(calls)
+    const results = await rpcBatchThrottled(calls)
 
     const positions: any[] = []
     for (let i = 0; i < vaults.length; i++) {
@@ -709,7 +733,7 @@ async function fetchKuru(user: string): Promise<any[]> {
       calls.push(ethCall(m.address, '0x18160ddd',        901 + i * 3))
       calls.push(ethCall(m.address, KURU_NAV_SEL,        902 + i * 3))
     })
-    const results = await rpcBatch(calls)
+    const results = await rpcBatchThrottled(calls)
 
     const items: any[] = []
     metas.forEach((m, i) => {
@@ -772,7 +796,7 @@ async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
     CURVANCE_DEBT_CTOKENS.forEach(ct => {
       calls.push(ethCall(ct.addr, CURVANCE_BORROW_SEL + upad, id++))
     })
-    const results = await rpcBatch(calls, 12_000)
+    const results = await rpcBatchThrottled(calls, 12_000)
     const getR = (n: number) => results.find((r: any) => Number(r.id) === n)?.result ?? '0x'
 
     // Price: stables = $1, everything else = monPrice from CoinGecko
