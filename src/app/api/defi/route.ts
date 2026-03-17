@@ -67,6 +67,7 @@ const ZERION_PROTO_CONFIG: Record<string, { logo: string; type: string }> = {
   'Euler Yield':   { logo: '📐', type: 'vault'      },
   'Kuru':          { logo: '🌀', type: 'liquidity'  },
   'LAGOON':        { logo: '🏝️', type: 'vault'      },
+  'MIDAS':         { logo: '🏦', type: 'vault'      },
   'Morpho':        { logo: '🦋', type: 'vault'      },
   'Neverland':     { logo: '🧚', type: 'lending'    },
   'Monad Staking': { logo: '🟣', type: 'vault'      },
@@ -80,6 +81,7 @@ function zerionProtoUrl(proto: string, appUrl: string): string {
     'Euler Yield':   'https://app.euler.finance/?network=monad',
     'Kuru':          'https://www.kuru.io/vaults',
     'LAGOON':        'https://app.lagoon.finance',
+    'MIDAS':         'https://app.midas.app',
     'Morpho':        'https://app.morpho.org/monad',
     'Neverland':     'https://app.neverland.money',
     'Monad Staking': 'https://monad.xyz',
@@ -692,10 +694,38 @@ async function fetchMerklAprs(): Promise<AprLookup> {
   } catch { return new Map() }
 }
 
-async function buildAprLookup(): Promise<AprLookup> {
+// Protocol name aliases: best-aprs uses different names than Zerion for some protocols
+const PROTO_ALIASES: Record<string, string> = {
+  'Euler V2':   'Euler Yield',   // best-aprs calls it "Euler V2", Zerion calls it "Euler Yield"
+}
+
+async function buildAprLookup(origin?: string): Promise<AprLookup> {
+  // 1. Try the in-process aprCache (populated if best-aprs ran in same CF worker instance)
   const cached = getAprEntries()
-  if (cached) return entriesToLookup(cached)
+  if (cached) return entriesToLookup(cached.map(normalizeProtoName))
+
+  // 2. Fetch from our own best-aprs API (reuses its cache, single source of truth)
+  if (origin) {
+    try {
+      const res = await fetchThrottled(`${origin}/api/best-aprs?format=entries`, {
+        signal: AbortSignal.timeout(8_000), cache: 'no-store',
+      })
+      if (res.ok) {
+        const entries = await res.json()
+        if (Array.isArray(entries) && entries.length > 0) {
+          return entriesToLookup(entries.map(normalizeProtoName))
+        }
+      }
+    } catch { /* fall through to Merkl */ }
+  }
+
+  // 3. Fallback: fetch directly from Merkl
   return fetchMerklAprs()
+}
+
+function normalizeProtoName(e: any): any {
+  const alias = PROTO_ALIASES[e.protocol]
+  return alias ? { ...e, protocol: alias } : e
 }
 
 function lookupApr(map: AprLookup, pos: any): number {
@@ -726,7 +756,7 @@ interface DefiCacheEntry { result: any; fetchedAt: number; promise: Promise<any>
 const defiCache = new Map<string, DefiCacheEntry>()
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
-async function fetchDefiForAddress(address: string, debugMode: boolean): Promise<any> {
+async function fetchDefiForAddress(address: string, debugMode: boolean, origin?: string): Promise<any> {
   const [monPriceR] = await Promise.allSettled([getMonPrice()])
   const MON_PRICE   = monPriceR.status === 'fulfilled' ? (monPriceR.value as number) : 0
 
@@ -736,13 +766,13 @@ async function fetchDefiForAddress(address: string, debugMode: boolean): Promise
 
   // All fetchers in parallel — Zerion replaces 6 on-chain fetchers with 1 HTTP call
   // EulerV2 is now indexed by Zerion — no separate fetcher needed
-  const [zerionR, gearR, upshiftR, lstsR, midasR, uniR, pcakeR] =
+  // Midas now indexed by Zerion — no separate fetcher needed
+  const [zerionR, gearR, upshiftR, lstsR, uniR, pcakeR] =
     await Promise.allSettled([
       safeFetch('Zerion',        () => fetchZerion(address)),
       safeFetch('Gearbox',       () => fetchGearbox(address, MON_PRICE)),
       safeFetch('Upshift',       () => fetchUpshift(address)),
       safeFetch('MonLSTs',       () => fetchMonLSTs(address, MON_PRICE)),
-      safeFetch('Midas',         () => fetchMidas(address)),
       safeFetch('UniswapV3',     () => fetchUniswapV3(address, 'Uniswap V3',    UNI_NFT_PM, UNI_FACTORY)),
       safeFetch('PancakeswapV3', () => fetchUniswapV3(address, 'PancakeSwap V3', '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364', '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865')),
     ])
@@ -759,7 +789,7 @@ async function fetchDefiForAddress(address: string, debugMode: boolean): Promise
       ['Kintsu',  { status: 'fulfilled', value: lstPositions.filter(p => p.protocol === 'Kintsu')  }],
       ['Magma',   { status: 'fulfilled', value: lstPositions.filter(p => p.protocol === 'Magma')   }],
       ['ShMonad', { status: 'fulfilled', value: lstPositions.filter(p => p.protocol === 'shMonad') }],
-      ['Midas', midasR], ['UniswapV3', uniR], ['PancakeswapV3', pcakeR],
+      ['UniswapV3', uniR], ['PancakeswapV3', pcakeR],
     ]
     return {
       __debug: true, monPrice: MON_PRICE,
@@ -775,10 +805,10 @@ async function fetchDefiForAddress(address: string, debugMode: boolean): Promise
   let allPositions = [
     ...unwrap(zerionR),
     ...unwrap(gearR), ...unwrap(upshiftR), ...lstPositions,
-    ...unwrap(midasR), ...unwrap(uniR), ...unwrap(pcakeR),
+    ...unwrap(uniR), ...unwrap(pcakeR),
   ]
 
-  const bestAprsMap = await buildAprLookup()
+  const bestAprsMap = await buildAprLookup(origin)
   allPositions = injectBestAprs(allPositions, bestAprsMap)
 
   const totalNetValueUSD = allPositions.reduce((s, p) => s + (p.netValueUSD ?? 0), 0)
@@ -817,7 +847,7 @@ export async function GET(req: NextRequest) {
 
     // STALE: serve stale immediately and kick off background revalidation
     if (entry?.result && age < DEFI_STALE_TTL) {
-      const bgPromise = fetchDefiForAddress(address, false)
+      const bgPromise = fetchDefiForAddress(address, false, new URL(req.url).origin)
         .then(result  => { defiCache.set(key, { result, fetchedAt: Date.now(), promise: null }) })
         .catch(()     => { const e = defiCache.get(key); if (e) defiCache.set(key, { ...e, promise: null }) })
       defiCache.set(key, { ...entry, promise: bgPromise as any })
@@ -826,7 +856,8 @@ export async function GET(req: NextRequest) {
   }
 
   // EMPTY: first visit — must block until we have data
-  const promise = fetchDefiForAddress(address, debugMode)
+  const origin  = new URL(req.url).origin
+  const promise  = fetchDefiForAddress(address, debugMode, debugMode ? undefined : origin)
 
   if (!debugMode) {
     const existing = defiCache.get(key)
