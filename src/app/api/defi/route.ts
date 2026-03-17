@@ -4,6 +4,8 @@ import { getAllPrices } from '@/lib/priceCache'
 import { getAprEntries } from '@/lib/aprCache'
 
 export const revalidate = 0
+
+// ─── RPC helpers ─────────────────────────────────────────────────────────────
 function ethCall(to: string, data: string, id: number) {
   return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
 }
@@ -19,11 +21,7 @@ function decodeAddress(hex: string): string {
   return '0x' + hex.slice(2).slice(-40)
 }
 
-// ─── Dynamic token info resolver ─────────────────────────────────────────────
-// Tokens conhecidos pre-mapeados (zero custo de RPC).
-// Qualquer endereco nao listado aqui e resolvido on-chain via symbol()+decimals()
-// e cacheado no modulo — novos tokens aparecem automaticamente sem manutencao.
-
+// ─── Token info resolver ──────────────────────────────────────────────────────
 interface TokenInfo { symbol: string; decimals: number }
 
 const TOKEN_CACHE: Record<string, TokenInfo> = {
@@ -38,7 +36,6 @@ const TOKEN_CACHE: Record<string, TokenInfo> = {
   '0x1b68626dca36c7fe922fd2d55e4f631d962de19c': { symbol: 'shMON', decimals: 18 },
 }
 
-// Decodifica string ABI-encoded (symbol/name) — offset(32) + length(32) + data
 function decodeAbiString(hex: string): string {
   try {
     const d = hex.startsWith('0x') ? hex.slice(2) : hex
@@ -50,20 +47,14 @@ function decodeAbiString(hex: string): string {
   } catch { return '' }
 }
 
-/**
- * Resolve simbolo e decimals de tokens ERC-20 em batch.
- * Le do TOKEN_CACHE primeiro; desconhecidos sao buscados via RPC e cacheados.
- * Novos tokens do ecossistema Monad aparecem automaticamente.
- */
 async function resolveTokens(addresses: string[]): Promise<Record<string, TokenInfo>> {
   const unique  = [...new Set(addresses.map(a => a.toLowerCase()))]
   const unknown = unique.filter(a => !TOKEN_CACHE[a])
-
   if (unknown.length > 0) {
     const calls: object[] = []
     unknown.forEach((addr, i) => {
-      calls.push(ethCall(addr, '0x95d89b41', i * 2))      // symbol()
-      calls.push(ethCall(addr, '0x313ce567', i * 2 + 1)) // decimals()
+      calls.push(ethCall(addr, '0x95d89b41', i * 2))
+      calls.push(ethCall(addr, '0x313ce567', i * 2 + 1))
     })
     const results = await rpcBatch(calls).catch(() => [] as any[])
     unknown.forEach((addr, i) => {
@@ -74,7 +65,6 @@ async function resolveTokens(addresses: string[]): Promise<Record<string, TokenI
       TOKEN_CACHE[addr] = { symbol, decimals }
     })
   }
-
   const out: Record<string, TokenInfo> = {}
   for (const addr of addresses) {
     out[addr.toLowerCase()] = TOKEN_CACHE[addr.toLowerCase()] ?? { symbol: addr.slice(2, 8).toUpperCase(), decimals: 18 }
@@ -82,20 +72,12 @@ async function resolveTokens(addresses: string[]): Promise<Record<string, TokenI
   return out
 }
 
-// ─── Multi-token prices from shared priceCache ────────────────────────────────
+// ─── Price lookup ─────────────────────────────────────────────────────────────
 const SYMBOL_TO_COINGECKO: Record<string, string> = {
-  WMON:   'monad',
-  MON:    'monad',
-  sMON:   'monad',
-  gMON:   'monad',
-  shMON:  'monad',
-  aprMON: 'monad',
-  APR:    'monad',   // aprMON LST on Monad
-  WETH:   'ethereum',
-  WBTC:   'wrapped-bitcoin',
-  USDC:   'usd-coin',
-  USDT0:  'tether',
-  AUSD:   'agora-dollar',
+  WMON: 'monad', MON: 'monad', sMON: 'monad', gMON: 'monad', shMON: 'monad',
+  aprMON: 'monad', APR: 'monad',
+  WETH: 'ethereum', WBTC: 'wrapped-bitcoin',
+  USDC: 'usd-coin', USDT0: 'tether', AUSD: 'agora-dollar',
 }
 
 async function getTokenPricesUSD(symbols: string[]): Promise<Record<string, number>> {
@@ -110,18 +92,11 @@ async function getTokenPricesUSD(symbols: string[]): Promise<Record<string, numb
       if (id && prices[id]) out[sym] = prices[id]
     }
     return out
-  } catch {
-    return stables
-  }
+  } catch { return stables }
 }
 
-// ─── NEVERLAND (Aave V3 fork) — supply & borrow positions ───────────────────
-// Correcao: aTokens e debtTokens sao descobertos via getReserveData(underlying)
-//   slot[8]  = aTokenAddress
-//   slot[10] = variableDebtTokenAddress
-
+// ─── NEVERLAND ────────────────────────────────────────────────────────────────
 const NEVERLAND_POOL = '0x80F00661b13CC5F6ccd3885bE7b4C9c67545D585'
-
 const NEVERLAND_UNDERLYING: Array<{ address: string; symbol: string; decimals: number }> = [
   { address: '0x3bd359c1119da7da1d913d1c4d2b7c461115433a', symbol: 'WMON',  decimals: 18 },
   { address: '0x0555e30da8f98308edb960aa94c0db47230d2b9c', symbol: 'WBTC',  decimals: 8  },
@@ -143,12 +118,7 @@ async function fetchNeverland(user: string): Promise<any[]> {
     reserveCalls.push(ethCall(NEVERLAND_POOL, '0xbf92857c' + paddedUser, 999))
     const reserveResults = await rpcBatch(reserveCalls)
 
-    const discovered: Array<{
-      underlying: typeof NEVERLAND_UNDERLYING[0]
-      aToken:     string
-      debtToken:  string
-    }> = []
-
+    const discovered: Array<{ underlying: typeof NEVERLAND_UNDERLYING[0]; aToken: string; debtToken: string }> = []
     for (let i = 0; i < NEVERLAND_UNDERLYING.length; i++) {
       const hex = (reserveResults[i]?.result ?? '').slice(2)
       if (!hex || hex.length < 11 * 64) continue
@@ -158,7 +128,6 @@ async function fetchNeverland(user: string): Promise<any[]> {
       if (aToken === '0x0000000000000000000000000000000000000000') continue
       discovered.push({ underlying: NEVERLAND_UNDERLYING[i], aToken, debtToken })
     }
-
     if (discovered.length === 0) return []
 
     let totalCollateralUSD = 0, totalDebtUSD = 0, healthFactor: number | null = null
@@ -172,7 +141,6 @@ async function fetchNeverland(user: string): Promise<any[]> {
       const MAX_U256 = BigInt('0x' + 'f'.repeat(64))
       healthFactor   = hfRaw === MAX_U256 ? null : Number(hfRaw) / 1e18
     }
-
     if (totalCollateralUSD < 0.01 && totalDebtUSD < 0.01) return []
 
     const balCalls: object[] = []
@@ -185,19 +153,16 @@ async function fetchNeverland(user: string): Promise<any[]> {
 
     const supplyList: Array<{ symbol: string; amount: number; amountUSD: number }> = []
     const borrowList: Array<{ symbol: string; amount: number; amountUSD: number }> = []
-
     discovered.forEach(({ underlying }, i) => {
       const aBal   = decodeUint(balResults.find((r: any) => r.id === i * 2)?.result     ?? '0x')
       const dBal   = decodeUint(balResults.find((r: any) => r.id === i * 2 + 1)?.result ?? '0x')
       const price  = prices[underlying.symbol] ?? 0
       const factor = Math.pow(10, underlying.decimals)
-      if (aBal > 0n) { const amount = Number(aBal) / factor; if (amount >= 0.0001) supplyList.push({ symbol: underlying.symbol, amount, amountUSD: amount * price }) }
-      if (dBal > 0n) { const amount = Number(dBal) / factor; if (amount >= 0.0001) borrowList.push({ symbol: underlying.symbol, amount, amountUSD: amount * price }) }
+      if (aBal > 0n) { const amt = Number(aBal) / factor; if (amt >= 0.0001) supplyList.push({ symbol: underlying.symbol, amount: amt, amountUSD: amt * price }) }
+      if (dBal > 0n) { const amt = Number(dBal) / factor; if (amt >= 0.0001) borrowList.push({ symbol: underlying.symbol, amount: amt, amountUSD: amt * price }) }
     })
-
     if (supplyList.length === 0 && totalCollateralUSD > 0.01)
       supplyList.push({ symbol: '?', amount: 0, amountUSD: totalCollateralUSD })
-
     if (supplyList.length === 0 && borrowList.length === 0) return []
 
     return [{
@@ -207,19 +172,17 @@ async function fetchNeverland(user: string): Promise<any[]> {
       totalCollateralUSD, totalDebtUSD,
       netValueUSD: totalCollateralUSD - totalDebtUSD, healthFactor,
     }]
-  } catch (e: any) {
-    console.error('[defi][Neverland]', e?.message ?? e, e?.stack?.slice(0, 300))
-    return []
-  }
+  } catch (e: any) { console.error('[defi][Neverland]', e?.message ?? e); return [] }
 }
 
 // ─── MORPHO ───────────────────────────────────────────────────────────────────
 async function fetchMorpho(user: string): Promise<any[]> {
+  // Filter by chainId=143 to avoid positions on other chains for the same address
   const query = `query($addr:String!,$cid:Int!){
     userByAddress(address:$addr,chainId:$cid){
       marketPositions{
         market{
-          uniqueKey
+          uniqueKey chainId
           loanAsset{symbol decimals}
           collateralAsset{symbol decimals}
           state{supplyApy borrowApy}
@@ -231,7 +194,7 @@ async function fetchMorpho(user: string): Promise<any[]> {
       }
       vaultPositions{
         vault{
-          address name symbol
+          address name symbol chainId
           asset{symbol decimals}
           state{netApy totalAssetsUsd}
         }
@@ -251,6 +214,8 @@ async function fetchMorpho(user: string): Promise<any[]> {
     const out: any[] = []
 
     for (const p of u.marketPositions ?? []) {
+      // Extra guard: only process positions on Monad (chainId 143)
+      if (p.market?.chainId && Number(p.market.chainId) !== 143) continue
       const supUSD = Number(p.supplyAssetsUsd ?? 0), borUSD = Number(p.borrowAssetsUsd ?? 0), colUSD = Number(p.collateralUsd ?? 0)
       if (supUSD < 0.01 && borUSD < 0.01 && colUSD < 0.01) continue
       const loanSym = p.market?.loanAsset?.symbol ?? '?', collSym = p.market?.collateralAsset?.symbol
@@ -269,6 +234,7 @@ async function fetchMorpho(user: string): Promise<any[]> {
       })
     }
     for (const p of u.vaultPositions ?? []) {
+      if (p.vault?.chainId && Number(p.vault.chainId) !== 143) continue
       const usd = Number(p.assetsUsd ?? 0)
       if (usd < 0.01) continue
       const url = p.vault?.address ? `https://app.morpho.org/monad/vault?address=${p.vault.address}` : 'https://app.morpho.org/monad'
@@ -279,15 +245,13 @@ async function fetchMorpho(user: string): Promise<any[]> {
       })
     }
     return out
-  } catch (e: any) {
-    console.error('[defi][Morpho]', e?.message ?? e)
-    return []
-  }
+  } catch (e: any) { console.error('[defi][Morpho]', e?.message ?? e); return [] }
 }
 
 // ─── UNISWAP V3 / PANCAKESWAP V3 ─────────────────────────────────────────────
 const UNI_NFT_PM  = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53'
 const UNI_FACTORY = '0x204faca1764b154221e35c0d20abb3c525710498'
+
 function tokenOfOwnerByIndex(owner: string, idx: bigint): string {
   return '0x2f745c59' + owner.slice(2).toLowerCase().padStart(64, '0') + idx.toString(16).padStart(64, '0')
 }
@@ -301,29 +265,19 @@ function getPoolData(t0: string, t1: string, fee: number): string {
     + fee.toString(16).padStart(64, '0')
 }
 
-// Calcula amount0 e amount1 reais via math Uniswap V3
 function calcV3Amounts(
   liquidity: bigint, sqrtPriceX96: bigint,
   tickLower: number, tickUpper: number, currentTick: number,
   decimals0: number, decimals1: number,
 ): { amount0: number; amount1: number } {
-  const L     = Number(liquidity)
-  const sqrtP = Number(sqrtPriceX96) / (2 ** 96)
+  const L = Number(liquidity), sqrtP = Number(sqrtPriceX96) / (2 ** 96)
   const sqrtA = Math.sqrt(Math.pow(1.0001, tickLower))
   const sqrtB = Math.sqrt(Math.pow(1.0001, tickUpper))
   let amount0 = 0, amount1 = 0
-  if (currentTick < tickLower) {
-    amount0 = L * (1 / sqrtA - 1 / sqrtB)
-  } else if (currentTick >= tickUpper) {
-    amount1 = L * (sqrtB - sqrtA)
-  } else {
-    amount0 = L * (1 / sqrtP - 1 / sqrtB)
-    amount1 = L * (sqrtP - sqrtA)
-  }
-  return {
-    amount0: amount0 / Math.pow(10, decimals0),
-    amount1: amount1 / Math.pow(10, decimals1),
-  }
+  if (currentTick < tickLower)       { amount0 = L * (1 / sqrtA - 1 / sqrtB) }
+  else if (currentTick >= tickUpper) { amount1 = L * (sqrtB - sqrtA) }
+  else                               { amount0 = L * (1 / sqrtP - 1 / sqrtB); amount1 = L * (sqrtP - sqrtA) }
+  return { amount0: amount0 / Math.pow(10, decimals0), amount1: amount1 / Math.pow(10, decimals1) }
 }
 
 async function fetchUniswapV3(user: string, protocol: string, nftPM: string, factory: string): Promise<any[]> {
@@ -333,8 +287,7 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
     if (nftCount === 0) return []
 
     const limit     = Math.min(nftCount, 20)
-    const idCalls   = Array.from({ length: limit }, (_, i) =>
-      ethCall(nftPM, tokenOfOwnerByIndex(user, BigInt(i)), i + 10))
+    const idCalls   = Array.from({ length: limit }, (_, i) => ethCall(nftPM, tokenOfOwnerByIndex(user, BigInt(i)), i + 10))
     const idResults = await rpcBatch(idCalls)
     const tokenIds  = idResults.map((r: any) => decodeUint(r?.result ?? '0x')).filter((id: bigint) => id > 0n)
     if (!tokenIds.length) return []
@@ -343,10 +296,7 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
     const posResults = await rpcBatch(posCalls)
 
     const tokenAddresses = new Set<string>()
-    const parsedPositions: Array<{
-      token0: string; token1: string; fee: number
-      tickLower: number; tickUpper: number; liquidity: bigint
-    }> = []
+    const parsedPositions: Array<{ token0: string; token1: string; fee: number; tickLower: number; tickUpper: number; liquidity: bigint }> = []
 
     for (let i = 0; i < tokenIds.length; i++) {
       const hex = posResults[i]?.result
@@ -367,77 +317,52 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
       tokenAddresses.add(token1.toLowerCase())
       parsedPositions.push({ token0, token1, fee, tickLower, tickUpper, liquidity })
     }
-    console.error('[defi][' + protocol + '] parsedPositions:', parsedPositions.length, 'tokenAddresses:', [...tokenAddresses])
     if (!parsedPositions.length) return []
 
-    // Resolve simbolos/decimals de todos os tokens em batch (com cache)
-    let tokenInfoMap: Record<string, any> = {}
-    try {
-      tokenInfoMap = await resolveTokens([...tokenAddresses])
-      console.error('[defi][' + protocol + '] tokenInfoMap:', JSON.stringify(tokenInfoMap))
-    } catch (e: any) {
-      console.error('[defi][' + protocol + '] resolveTokens ERROR:', e?.message ?? e)
-    }
+    const tokenInfoMap = await resolveTokens([...tokenAddresses]).catch(() => ({} as Record<string, TokenInfo>))
 
     const poolCalls: object[] = []
     const poolMeta: Record<number, any> = {}
     let pcIdx = 500
-
     for (const pos of parsedPositions) {
       const t0 = tokenInfoMap[pos.token0.toLowerCase()] ?? { symbol: pos.token0.slice(2, 8).toUpperCase(), decimals: 18 }
       const t1 = tokenInfoMap[pos.token1.toLowerCase()] ?? { symbol: pos.token1.slice(2, 8).toUpperCase(), decimals: 18 }
       poolCalls.push(ethCall(factory, getPoolData(pos.token0, pos.token1, pos.fee), pcIdx))
       poolMeta[pcIdx] = { ...pos, t0sym: t0.symbol, t1sym: t1.symbol, t0dec: t0.decimals, t1dec: t1.decimals }
-      console.error('[defi][' + protocol + '] poolMeta[' + pcIdx + ']:', t0.symbol, '/', t1.symbol)
       pcIdx++
     }
 
     const poolAddrResults = await rpcBatch(poolCalls)
-    console.error('[defi][' + protocol + '] poolAddrResults:', poolAddrResults.map((r: any) => ({ id: r.id, addr: r.result ? r.result.slice(-40) : 'NULL', error: r.error })))
-
     const slot0Calls: object[] = []
     const slot0Meta: Record<number, any> = {}
     let s0Idx = 600
-
     for (const res of poolAddrResults) {
-      // Coerce id to number — rpcBatch may return id as string or number depending on JSON parsing
       const meta = poolMeta[Number(res.id)]
-      if (!meta) { console.error('[defi][' + protocol + '] poolMeta miss id:', res.id, '(as number:', Number(res.id), ') keys:', Object.keys(poolMeta)); continue }
-      if (!res.result || res.result === '0x') { console.error('[defi][' + protocol + '] empty pool result for id:', res.id); continue }
+      if (!meta || !res.result || res.result === '0x') continue
       const poolAddr = decodeAddress(res.result)
-      if (poolAddr === '0x0000000000000000000000000000000000000000') { console.error('[defi][' + protocol + '] zero pool addr'); continue }
+      if (poolAddr === '0x0000000000000000000000000000000000000000') continue
       slot0Calls.push(ethCall(poolAddr, '0x3850c7bd', s0Idx))
       slot0Meta[s0Idx] = meta
       s0Idx++
     }
-    console.error('[defi][' + protocol + '] slot0Calls count:', slot0Calls.length)
     if (!slot0Calls.length) return []
-    const slot0Results = await rpcBatch(slot0Calls)
-    console.error('[defi][' + protocol + '] slot0Results:', slot0Results.map((r: any) => ({ id: r.id, len: r.result?.length, error: r.error })))
 
+    const slot0Results = await rpcBatch(slot0Calls)
     const allSymbols = [...new Set(Object.values(slot0Meta).flatMap((m: any) => [m.t0sym, m.t1sym]))]
     const prices     = await getTokenPricesUSD(allSymbols)
-    console.error('[defi][' + protocol + '] prices:', JSON.stringify(prices))
 
     const positions: any[] = []
     for (const s0 of slot0Results) {
       const meta = slot0Meta[Number(s0.id)]
-      if (!meta) { console.error('[defi][' + protocol + '] slot0Meta miss id:', s0.id, '(as number:', Number(s0.id), ')'); continue }
-      if (!s0.result || s0.result === '0x' || s0.result.length < 10) { console.error('[defi][' + protocol + '] bad slot0 result len:', s0.result?.length); continue }
+      if (!meta || !s0.result || s0.result === '0x' || s0.result.length < 10) continue
       const d  = s0.result.slice(2)
       const w  = Array.from({ length: 4 }, (_, j) => d.slice(j * 64, (j + 1) * 64))
       const ct = parseInt(w[1], 16)
       const currentTick  = ct > 0x7fffffff ? ct - 0x100000000 : ct
       const sqrtPriceX96 = BigInt('0x' + w[0])
       const inRange      = currentTick >= meta.tickLower && currentTick <= meta.tickUpper
-
-      const { amount0, amount1 } = calcV3Amounts(
-        meta.liquidity, sqrtPriceX96,
-        meta.tickLower, meta.tickUpper, currentTick,
-        meta.t0dec, meta.t1dec
-      )
+      const { amount0, amount1 } = calcV3Amounts(meta.liquidity, sqrtPriceX96, meta.tickLower, meta.tickUpper, currentTick, meta.t0dec, meta.t1dec)
       const amountUSD = amount0 * (prices[meta.t0sym] ?? 0) + amount1 * (prices[meta.t1sym] ?? 0)
-
       positions.push({
         protocol, type: 'liquidity',
         logo:    protocol === 'PancakeSwap V3' ? '🥞' : '🦄',
@@ -451,38 +376,27 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
       })
     }
     return positions
-  } catch (e: any) {
-    console.error('[defi][UniswapV3]', e?.message ?? e, e?.stack?.slice(0, 300))
-    return []
-  }
+  } catch (e: any) { console.error('[defi][UniswapV3]', e?.message ?? e); return [] }
 }
 
 // ─── CURVE ────────────────────────────────────────────────────────────────────
-
 async function fetchCurve(user: string): Promise<any[]> {
-  const BASE        = 'https://api-core.curve.finance/v1'
-  const paddedAddr  = user.slice(2).toLowerCase().padStart(64, '0')
-  const poolTypes   = ['factory-twocrypto', 'factory-stable-ng']
+  const BASE       = 'https://api-core.curve.finance/v1'
+  const paddedAddr = user.slice(2).toLowerCase().padStart(64, '0')
 
-  // Fetch pool lists — failures are independent
   const poolResults = await Promise.allSettled(
-    poolTypes.map(t =>
+    ['factory-twocrypto', 'factory-stable-ng'].map(t =>
       fetch(`${BASE}/getPools/monad/${t}`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
-        .then(r => r.ok ? r.json() : null)
-        .catch(() => null)
+        .then(r => r.ok ? r.json() : null).catch(() => null)
     )
   )
-
   const allPools: any[] = []
   for (const r of poolResults) {
-    if (r.status === 'fulfilled' && r.value?.data?.poolData) {
-      allPools.push(...r.value.data.poolData)
-    }
+    if (r.status === 'fulfilled' && r.value?.data?.poolData) allPools.push(...r.value.data.poolData)
   }
   if (allPools.length === 0) return []
 
-  // balanceOf(user) for each pool LP token — chunked to avoid timeout
-  const CHUNK      = 15
+  const CHUNK = 15
   const rpcResults: any[] = []
   for (let start = 0; start < allPools.length; start += CHUNK) {
     const chunk = allPools.slice(start, start + CHUNK)
@@ -493,58 +407,42 @@ async function fetchCurve(user: string): Promise<any[]> {
     try {
       const res = await rpcBatch(calls, 12_000)
       rpcResults.push(...res)
-    } catch (e: any) {
-      console.error('[Curve] rpcBatch chunk error:', e?.message ?? e)
-    }
+    } catch { /* chunk failed — skip */ }
   }
 
   const positions: any[] = []
-
   for (let i = 0; i < allPools.length; i++) {
-    const r   = rpcResults.find((x: any) => Number(x.id) === i)
+    const r = rpcResults.find((x: any) => Number(x.id) === i)
     const raw = r?.result ?? '0x'
     if (!raw || raw === '0x' || raw === '0x' + '0'.repeat(64)) continue
     let balanceRaw: bigint
     try { balanceRaw = BigInt(raw) } catch { continue }
     if (balanceRaw === 0n) continue
 
-    const pool             = allPools[i]
-    const totalSupplyRaw   = (() => { try { return BigInt(pool.totalSupply ?? '0') } catch { return 0n } })()
-    const lpPrice          = Number(pool.lpTokenPrice ?? 0)
-    const userBalanceFloat = Number(balanceRaw) / 1e18
-
-    const netValueUSD = lpPrice > 0
-      ? userBalanceFloat * lpPrice
+    const pool           = allPools[i]
+    const totalSupplyRaw = (() => { try { return BigInt(pool.totalSupply ?? '0') } catch { return 0n } })()
+    const lpPrice        = Number(pool.lpTokenPrice ?? 0)
+    const userBal        = Number(balanceRaw) / 1e18
+    const netValueUSD    = lpPrice > 0
+      ? userBal * lpPrice
       : totalSupplyRaw > 0n
         ? (Number(balanceRaw) / Number(totalSupplyRaw)) * Number(pool.usdTotalExcludingBasePool ?? pool.usdTotal ?? 0)
         : 0
-
     if (netValueUSD < 0.01) continue
 
-    const coins  = pool.coins?.map((c: any) => c.symbol) ?? []
-    const poolId = pool.id ?? pool.address
-
-    // APR injected post-processing via injectBestAprs()
-    const apy = 0
-
+    const coins = pool.coins?.map((c: any) => c.symbol) ?? []
     positions.push({
       protocol: 'Curve', type: 'liquidity', logo: '🌊',
-      url: `https://curve.finance/dex/monad/pools/${poolId}/deposit`, chain: 'Monad',
-      label:     pool.name ?? coins.join('/'),
-      tokens:    coins,
-      amountUSD: netValueUSD,
-      apy,
-      netValueUSD,
-      inRange:   null,
+      url: `https://curve.finance/dex/monad/pools/${pool.id ?? pool.address}/deposit`, chain: 'Monad',
+      label: pool.name ?? coins.join('/'), tokens: coins,
+      amountUSD: netValueUSD, apy: 0, netValueUSD, inRange: null,
     })
   }
-
   return positions
 }
 
 // ─── GEARBOX ──────────────────────────────────────────────────────────────────
 const GEARBOX_STATIC_URL = 'https://state-cache.gearbox.foundation/Monad.json'
-
 const GEARBOX_TOKEN_MAP: Record<string, { token: string; isStable: boolean }> = {
   '0x34752948b0dc28969485df2066ffe86d5dc36689': { token: 'WMON', isStable: false },
   '0x09ca6b76276ec0682adb896418b99cb7e44a58a0': { token: 'WMON', isStable: false },
@@ -553,18 +451,14 @@ const GEARBOX_TOKEN_MAP: Record<string, { token: string; isStable: boolean }> = 
   '0x164a35f31e4e0f6c45d500962a6978d2cbd5a16b': { token: 'USDT', isStable: true  },
 }
 
-async function fetchGearbox(user: string): Promise<any[]> {
+async function fetchGearbox(user: string, monPrice: number): Promise<any[]> {
   try {
     const res = await fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
     if (!res.ok) return []
     const data = await res.json()
-    const markets: any[] = data?.markets ?? []
-    if (!markets.length) return []
-
-    const pools = markets.map((m: any) => m?.pool).filter((p: any) => {
-      if (!p) return false
-      return !!GEARBOX_TOKEN_MAP[(p?.baseParams?.addr ?? '').toLowerCase()]
-    })
+    const pools = (data?.markets ?? [])
+      .map((m: any) => m?.pool)
+      .filter((p: any) => p && !!GEARBOX_TOKEN_MAP[(p?.baseParams?.addr ?? '').toLowerCase()])
     if (!pools.length) return []
 
     const calls   = pools.map((p: any, i: number) => ethCall(p.baseParams.addr, balanceOfData(user), i + 200))
@@ -578,25 +472,31 @@ async function fetchGearbox(user: string): Promise<any[]> {
       if (!meta) continue
       const shares = decodeUint(results.find((r: any) => Number(r.id) === i + 200)?.result ?? '0x')
       if (shares === 0n) continue
-      const decimals     = Number(pool.decimals ?? 18)
-      const sharesFloat  = Number(shares) / Math.pow(10, decimals)
-      const expectedLiq  = BigInt(pool.expectedLiquidity?.__value ?? '0')
-      const totalSupply  = BigInt(pool.totalSupply?.__value ?? pool.totalSupply ?? '0')
-      let amountUSD = 0
-      if (totalSupply > 0n) amountUSD = meta.isStable ? sharesFloat * (Number(expectedLiq) / Number(totalSupply)) : 0
+
+      const decimals    = Number(pool.decimals ?? 18)
+      const sharesFloat = Number(shares) / Math.pow(10, decimals)
+      const expectedLiq = BigInt(pool.expectedLiquidity?.__value ?? '0')
+      const totalSupply = BigInt(pool.totalSupply?.__value ?? pool.totalSupply ?? '0')
+      if (totalSupply === 0n) continue
+
+      // Exchange rate = expectedLiq / totalSupply (both in raw decimals)
+      const exchangeRate = Number(expectedLiq) / Number(totalSupply)
+      // For stables: amountUSD = shares * exchangeRate (already in USD)
+      // For MON pools: amountUSD = shares * exchangeRate * monPrice
+      const amountUSD = meta.isStable
+        ? sharesFloat * exchangeRate
+        : sharesFloat * exchangeRate * monPrice
+
+      if (amountUSD < 0.01) continue
       positions.push({
         protocol: 'GearBox V3', type: 'vault', logo: '⚙️',
         url: 'https://app.gearbox.fi/pools?chainId=143', chain: 'Monad',
         label: pool.name ?? meta.token, asset: meta.token,
-        shares: sharesFloat, amountUSD, apy: 0, netValueUSD: amountUSD,
-        _needsMonPrice: !meta.isStable,
-        // Exchange rate: expectedLiq/totalSupply (both in same raw units — no decimals division needed here)
-        // sharesFloat already accounts for decimals; multiplying by this rate gives MON amount
-        _expectedLiqPerShare: totalSupply > 0n ? Number(expectedLiq) / Number(totalSupply) : 0,
+        amount: sharesFloat, amountUSD, apy: 0, netValueUSD: amountUSD,
       })
     }
     return positions
-  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
+  } catch (e: any) { console.error('[defi][Gearbox]', e?.message ?? e); return [] }
 }
 
 // ─── UPSHIFT ──────────────────────────────────────────────────────────────────
@@ -604,21 +504,15 @@ const UPSHIFT_API_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Accept': 'application/json',
 }
-// Ignore Kintsu superMON vault — it's already tracked under Kintsu
-const UPSHIFT_IGNORE = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c'])
-
-// Upshift vaults use a separate ERC-20 share token (not the vault address itself).
-// The vault exposes its share token via selector 0xf5ae497a (no args → address).
-// Vaults that don't implement this selector fall back to balanceOf(vault) directly.
-// Share token addresses are resolved once per request via rpcBatch.
+const UPSHIFT_IGNORE       = new Set(['0x792c7c5fb5c996e588b9f4a5fb201c79974e267c'])
 const UPSHIFT_SHARE_TOKEN_SEL = '0xf5ae497a'
 
 function upshiftTokenFromName(name: string): string {
-  if (/AUSD/i.test(name))       return 'AUSD'
-  if (/USDC/i.test(name))       return 'USDC'
-  if (/USDT/i.test(name))       return 'USDT'
-  if (/BTC|wBTC/i.test(name))  return 'WBTC'
-  if (/MON/i.test(name))        return 'MON'
+  if (/AUSD/i.test(name))      return 'AUSD'
+  if (/USDC/i.test(name))      return 'USDC'
+  if (/USDT/i.test(name))      return 'USDT'
+  if (/BTC|wBTC/i.test(name)) return 'WBTC'
+  if (/MON/i.test(name))       return 'MON'
   return '?'
 }
 
@@ -629,135 +523,83 @@ async function fetchUpshift(user: string): Promise<any[]> {
     })
     if (!res.ok) return []
     const raw: any[] = await res.json()
-
-    // Filter: Monad chain, not test/bugbash, not ignored, minimum TVL $1
     const vaults = (Array.isArray(raw) ? raw : []).filter((v: any) => {
       if (v.chain !== 143) return false
       if (/test|bugbash/i.test(v.vault_name ?? '')) return false
       if (UPSHIFT_IGNORE.has((v.address ?? '').toLowerCase())) return false
-      const tvl = Number(v.total_assets ?? 0) * Number(v.underlying_price ?? 0)
-      return tvl >= 1
+      return Number(v.total_assets ?? 0) * Number(v.underlying_price ?? 0) >= 1
     })
     if (!vaults.length) return []
 
-    // Step 1: resolve share token address for each vault via selector 0xf5ae497a.
-    // Vaults that implement this return their separate ERC-20 share token address.
-    // Vaults that don't (different type) return 0x — fall back to vault address itself.
-    const shareTokenCalls = vaults.map((v: any, i: number) =>
-      ethCall(v.address, UPSHIFT_SHARE_TOKEN_SEL, i)
-    )
-    const shareTokenResults = await rpcBatch(shareTokenCalls)
+    // Resolve share tokens in one batch
+    const shareTokenResults = await rpcBatch(vaults.map((v: any, i: number) => ethCall(v.address, UPSHIFT_SHARE_TOKEN_SEL, i)))
     const shareTokenAddrs = vaults.map((v: any, i: number) => {
-      const r   = shareTokenResults.find((x: any) => Number(x.id) === i)
-      const addr = decodeAddress(r?.result ?? '')
-      // Use share token if valid; otherwise fall back to vault address
-      return (addr && addr !== '0x0000000000000000000000000000000000000000')
-        ? addr
-        : v.address.toLowerCase()
+      const addr = decodeAddress(shareTokenResults.find((x: any) => Number(x.id) === i)?.result ?? '')
+      return (addr && addr !== '0x0000000000000000000000000000000000000000') ? addr : v.address.toLowerCase()
     })
 
-    // Step 2: balanceOf(user) on the resolved share token (or vault if no share token)
-    const balanceCalls = shareTokenAddrs.map((addr: string, i: number) =>
-      ethCall(addr, balanceOfData(user), i + 700)
-    )
-    const results = await rpcBatch(balanceCalls)
+    const results = await rpcBatch(shareTokenAddrs.map((addr: string, i: number) => ethCall(addr, balanceOfData(user), i + 700)))
 
     const positions: any[] = []
     for (let i = 0; i < vaults.length; i++) {
       const v      = vaults[i]
       const shares = decodeUint(results.find((r: any) => Number(r.id) === i + 700)?.result ?? '0x')
       if (shares === 0n) continue
-
-      // Share tokens always use 18 decimals
       const sharesFloat = Number(shares) / 1e18
-      const ratio       = Number(v.asset_share_ratio ?? 1)
-      const price       = Number(v.underlying_price ?? 0)
-      const amountUSD   = sharesFloat * ratio * price
+      const amountUSD   = sharesFloat * Number(v.asset_share_ratio ?? 1) * Number(v.underlying_price ?? 0)
       if (amountUSD < 0.01) continue
-
-      const name = v.vault_name ?? ''
-      const asset = upshiftTokenFromName(name)
-
-      // APY: values are decimals (e.g. 0.123 = 12.3%)
-      const apy7d    = v['7d_apy']  != null ? Number(v['7d_apy'])  : null
-      const apy30d   = v['30d_apy'] != null ? Number(v['30d_apy']) : null
-      const target   = v.target_apy != null ? Number(v.target_apy) : null
-      const MIN_HIST = 0.005
-      const bestHist = Math.max(apy7d ?? 0, apy30d ?? 0)
-      const apyDec   = (bestHist >= MIN_HIST) ? bestHist
-        : (target != null && target > 0) ? target
-        : 0
-      const apy = apyDec > 0 ? (Math.pow(1 + apyDec, 1/365) - 1) * 365 * 100 : 0
-
       positions.push({
         protocol: 'Upshift', type: 'vault', logo: '🔺',
         url: `https://app.upshift.finance/vaults/${v.address}`, chain: 'Monad',
-        label: name, asset, amount: sharesFloat, amountUSD, apy, netValueUSD: amountUSD,
+        label: v.vault_name ?? '', asset: upshiftTokenFromName(v.vault_name ?? ''),
+        amount: sharesFloat, amountUSD, apy: 0, netValueUSD: amountUSD,
       })
     }
     return positions
-  } catch (e: any) { console.error('[defi] fetchUpshift error:', e?.message ?? String(e)); return [] }
+  } catch (e: any) { console.error('[defi][Upshift]', e?.message ?? e); return [] }
 }
 
-// ─── KINTSU (sMON LST) ────────────────────────────────────────────────────────
-const KINTSU_SMON = '0xA3227C5969757783154C60bF0bC1944180ed81B9'
-// 0x6ec21cc8 = totalStakedMON() — total MON controlled by the staking contract.
-// APR = (rate_now - rate_past) / rate_past / days * 365 * 100
-// where rate = totalStakedMON / totalSupply(sMON)
+// ─── MON LSTs (Kintsu + Magma + shMonad) ─────────────────────────────────────
+// Consolidated fetcher: single balanceOf batch, then previewRedeem only for non-zero balances.
+// Replaces 3 separate fetchers with up to 6 sequential rpcBatch calls.
+const MON_LSTS = [
+  { addr: '0xA3227C5969757783154C60bF0bC1944180ed81B9', protocol: 'Kintsu',  logo: '🔵', url: 'https://kintsu.xyz',      label: 'Staked MON',              asset: 'sMON',  redeemSel: '0x4cdad506' },
+  { addr: '0x8498312a6b3CBD158Bf0c93ABdcF29E6e4f55081', protocol: 'Magma',   logo: '🐲', url: 'https://magmastaking.xyz', label: 'MEV-Optimized Staked MON', asset: 'gMON',  redeemSel: '0x07a2d13a' },
+  { addr: '0x1B68626dCa36c7fE922fD2d55E4f631d962dE19c', protocol: 'shMonad', logo: '⚡', url: 'https://shmonad.xyz',     label: 'Holistic Staked MON',      asset: 'shMON', redeemSel: '0x4cdad506' },
+]
 
-async function fetchKintsu(user: string, monPrice: number): Promise<any[]> {
+async function fetchMonLSTs(user: string, monPrice: number): Promise<any[]> {
   try {
-    const balRes = await rpcBatch([ethCall(KINTSU_SMON, balanceOfData(user), 800)])
-    const shares = decodeUint(balRes[0]?.result ?? '0x')
-    if (shares === 0n) return []
-    const sharesFloat = Number(shares) / 1e18
-    const redeemRes   = await rpcBatch([ethCall(KINTSU_SMON, '0x4cdad506' + shares.toString(16).padStart(64, '0'), 801)])
-    const monAmt      = Number(decodeUint(redeemRes[0]?.result ?? '0x')) / 1e18 || sharesFloat
-    const usd         = monAmt * monPrice
-    if (sharesFloat < 0.001) return []
-    return [{ protocol: 'Kintsu', type: 'vault', logo: '🔵', url: 'https://kintsu.xyz', chain: 'Monad', label: 'Staked MON', asset: 'sMON', amount: sharesFloat, amountUSD: usd, apy: 0, netValueUSD: usd }]
-  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
+    // Step 1: balanceOf for all three in one batch
+    const balResults = await rpcBatch(MON_LSTS.map((lst, i) => ethCall(lst.addr, balanceOfData(user), i)))
+    const withBalance = MON_LSTS.map((lst, i) => ({
+      ...lst,
+      shares: decodeUint(balResults.find((r: any) => Number(r.id) === i)?.result ?? '0x'),
+    })).filter(lst => lst.shares > 0n && Number(lst.shares) / 1e18 >= 0.001)
+
+    if (!withBalance.length) return []
+
+    // Step 2: previewRedeem only for LSTs with balance
+    const redeemResults = await rpcBatch(withBalance.map((lst, i) =>
+      ethCall(lst.addr, lst.redeemSel + lst.shares.toString(16).padStart(64, '0'), i + 10)
+    ))
+
+    return withBalance.map((lst, i) => {
+      const sharesFloat = Number(lst.shares) / 1e18
+      const monAmt      = Number(decodeUint(redeemResults.find((r: any) => Number(r.id) === i + 10)?.result ?? '0x')) / 1e18 || sharesFloat
+      const amountUSD   = monAmt * monPrice
+      return {
+        protocol: lst.protocol, type: 'vault', logo: lst.logo, url: lst.url, chain: 'Monad',
+        label: lst.label, asset: lst.asset, amount: sharesFloat, amountUSD, apy: 0, netValueUSD: amountUSD,
+      }
+    })
+  } catch (e: any) { console.error('[defi][MonLSTs]', e?.message ?? e); return [] }
 }
 
-// ─── MAGMA (gMON LST) ─────────────────────────────────────────────────────────
-const MAGMA_GMON = '0x8498312a6b3CBD158Bf0c93ABdcF29E6e4f55081'
-
-async function fetchMagma(user: string, monPrice: number): Promise<any[]> {
-  try {
-    const balRes = await rpcBatch([ethCall(MAGMA_GMON, balanceOfData(user), 810)])
-    const shares = decodeUint(balRes[0]?.result ?? '0x')
-    if (shares === 0n) return []
-    const sharesFloat = Number(shares) / 1e18
-    const redeemRes   = await rpcBatch([ethCall(MAGMA_GMON, '0x07a2d13a' + shares.toString(16).padStart(64, '0'), 811)])
-    const monAmt      = Number(decodeUint(redeemRes[0]?.result ?? '0x')) / 1e18 || sharesFloat
-    const usd         = monAmt * monPrice
-    if (sharesFloat < 0.001) return []
-    return [{ protocol: 'Magma', type: 'vault', logo: '🐲', url: 'https://magmastaking.xyz', chain: 'Monad', label: 'MEV-Optimized Staked MON', asset: 'gMON', amount: sharesFloat, amountUSD: usd, apy: 0, netValueUSD: usd }]
-  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
-}
-
-// ─── shMONAD ──────────────────────────────────────────────────────────────────
-const SHMONAD_ADDR = '0x1B68626dCa36c7fE922fD2d55E4f631d962dE19c'
-
-async function fetchShMonad(user: string, monPrice: number): Promise<any[]> {
-  try {
-    const balRes = await rpcBatch([ethCall(SHMONAD_ADDR, balanceOfData(user), 820)])
-    const shares = decodeUint(balRes[0]?.result ?? '0x')
-    if (shares === 0n) return []
-    const sharesFloat = Number(shares) / 1e18
-    const redeemRes   = await rpcBatch([ethCall(SHMONAD_ADDR, '0x4cdad506' + shares.toString(16).padStart(64, '0'), 821)])
-    const monAmt      = Number(decodeUint(redeemRes[0]?.result ?? '0x')) / 1e18 || sharesFloat
-    const usd         = monAmt * monPrice
-    if (sharesFloat < 0.001) return []
-    return [{ protocol: 'shMonad', type: 'vault', logo: '⚡', url: 'https://shmonad.xyz', chain: 'Monad', label: 'Holistic Staked MON', asset: 'shMON', amount: sharesFloat, amountUSD: usd, apy: 0, netValueUSD: usd }]
-  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
-}
-
-// ─── LAGOON FINANCE ───────────────────────────────────────────────────────────
+// ─── LAGOON ───────────────────────────────────────────────────────────────────
 async function fetchLagoon(user: string): Promise<any[]> {
   const paddedAddr = user.slice(2).toLowerCase().padStart(64, '0')
   try {
-    // Use full URL with includeApr — exposes asset.decimals and state.weeklyApr
     const res = await fetch(
       'https://app.lagoon.finance/api/vaults?chainId=143&underlyingassetSymbol=0&curatorId=0&pageIndex=0&pageSize=50&includeApr=true',
       {
@@ -768,75 +610,56 @@ async function fetchLagoon(user: string): Promise<any[]> {
     if (!res.ok) return []
     const data   = await res.json()
     const vaults: any[] = data?.vaults ?? data ?? []
-    if (vaults.length === 0) return []
+    if (!vaults.length) return []
 
     const calls = vaults.flatMap((v: any, i: number) => [
-      ethCall(v.address, '0x70a08231' + paddedAddr, i * 3),      // balanceOf(user) — shares (18dp)
-      ethCall(v.address, '0x01e1d114', i * 3 + 1),               // totalAssets() — in asset decimals
-      ethCall(v.address, '0x18160ddd', i * 3 + 2),               // totalSupply() — shares (18dp)
+      ethCall(v.address, '0x70a08231' + paddedAddr, i * 3),
+      ethCall(v.address, '0x01e1d114', i * 3 + 1),
+      ethCall(v.address, '0x18160ddd', i * 3 + 2),
     ])
     const results = await rpcBatch(calls)
 
     const positions: any[] = []
     for (let i = 0; i < vaults.length; i++) {
-      const v = vaults[i]
+      const v           = vaults[i]
       const shares      = decodeUint(results.find((r: any) => Number(r.id) === i * 3)?.result     ?? '0x')
       if (shares === 0n) continue
       const totalAssets = decodeUint(results.find((r: any) => Number(r.id) === i * 3 + 1)?.result ?? '0x')
       const totalSupply = decodeUint(results.find((r: any) => Number(r.id) === i * 3 + 2)?.result ?? '0x')
       if (totalSupply === 0n) continue
 
-      // Vault shares are always 18dp; underlying asset may have different decimals (USDC/AUSD = 6dp).
-      // Must normalise both to the same unit before dividing.
-      const shareDec  = Number(v.decimals ?? 18)                  // share token decimals (always 18)
-      const assetDec  = Number(v.asset?.decimals ?? 18)           // underlying asset decimals
+      const shareDec   = Number(v.decimals ?? 18)
+      const assetDec   = Number(v.asset?.decimals ?? 18)
       const assetPrice = Number(v.asset?.priceUsd ?? 1)
-
-      const shareFloat   = Number(shares)      / Math.pow(10, shareDec)
-      const assetsFloat  = Number(totalAssets) / Math.pow(10, assetDec)
-      const supplyFloat  = Number(totalSupply) / Math.pow(10, shareDec)
-
-      // Price per share in asset units → multiply by asset USD price
-      const pricePerShare = assetsFloat / supplyFloat
-      const amountUSD     = shareFloat * pricePerShare * assetPrice
+      const shareFloat = Number(shares)      / Math.pow(10, shareDec)
+      const assetsUSD  = Number(totalAssets) / Math.pow(10, assetDec)
+      const supplyFlt  = Number(totalSupply) / Math.pow(10, shareDec)
+      const amountUSD  = shareFloat * (assetsUSD / supplyFlt) * assetPrice
       if (amountUSD < 0.01) continue
 
-      // APR from API state (already a percentage)
       const s   = v.state ?? {}
       const apr = s.weeklyApr?.linearNetApr ?? s.monthlyApr?.linearNetApr ?? s.inceptionApr?.linearNetApr ?? 0
-
-      const assetSymbol = v.asset?.symbol ?? v.symbol ?? 'USDC'
+      const sym = v.asset?.symbol ?? v.symbol ?? 'USDC'
       positions.push({
         protocol: 'Lagoon', type: 'vault', logo: '🏝️',
         url: `https://app.lagoon.finance/vault/143/${v.address}`, chain: 'Monad',
-        label: v.name ?? v.symbol ?? 'Lagoon Vault', asset: assetSymbol,
-        tokens: [assetSymbol],
+        label: v.name ?? v.symbol ?? 'Lagoon Vault', asset: sym, tokens: [sym],
         amountUSD, apy: apr, netValueUSD: amountUSD,
       })
     }
     return positions
-  } catch (e: any) { console.error('[defi] fetchLagoon error:', e?.message ?? String(e)); return [] }
+  } catch (e: any) { console.error('[defi][Lagoon]', e?.message ?? e); return [] }
 }
 
 // ─── KURU ─────────────────────────────────────────────────────────────────────
-// Kuru vaults don't implement ERC4626 — they use a custom NAV function:
-//   0xe04d89da() → total vault value in quote token (at quote token decimals)
-// USD value = (userShares / totalSupply) × (navRaw / 10^quoteDecimals)
-//
-// Vault list is fetched dynamically from the Kuru API (api.kuru.io/api/v2/vaults)
-// so new vaults are detected automatically without code changes.
-
-const KURU_API = 'https://api.kuru.io/api/v3/vaults'
-const KURU_NAV_SEL = '0xe04d89da'  // getVaultValue() — returns NAV in quote token
+const KURU_API     = 'https://api.kuru.io/api/v3/vaults'
+const KURU_NAV_SEL = '0xe04d89da'
 const KURU_HEADERS = {
   'Accept': 'application/json',
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Origin': 'https://www.kuru.io',
   'Referer': 'https://www.kuru.io/',
 }
-
-// Known vaults not yet indexed by the Kuru API
-// Add new ones here if they appear in user deposits before the API includes them
 const KURU_LEGACY_VAULTS = [
   { address: '0x4869a4c7657cef5e5496c9ce56dde4cd593e4923', name: 'Kuru MON/AUSD', base: 'MON', quote: 'AUSD', quoteDec: 6 },
   { address: '0xd0f8a6422ccdd812f29d8fb75cf5fcd41483badc', name: 'Kuru MON/USDC', base: 'MON', quote: 'USDC', quoteDec: 6 },
@@ -844,18 +667,12 @@ const KURU_LEGACY_VAULTS = [
 
 async function fetchKuru(user: string): Promise<any[]> {
   try {
-    // Fetch vault list from Kuru API — fails gracefully, falls back to legacy list
     type VaultMeta = { address: string; name: string; base: string; quote: string; quoteDec: number }
-
     let apiMetas: VaultMeta[] = []
     try {
-      const apiRes = await fetch(KURU_API, {
-        signal: AbortSignal.timeout(8_000), cache: 'no-store',
-        headers: KURU_HEADERS,
-      })
+      const apiRes = await fetch(KURU_API, { signal: AbortSignal.timeout(8_000), cache: 'no-store', headers: KURU_HEADERS })
       if (apiRes.ok) {
-        const apiData = await apiRes.json()
-        // v3 API shape: { data: { data: [...], pagination: {...} } }
+        const apiData  = await apiRes.json()
         const vaultList = apiData?.data?.data ?? apiData?.data ?? []
         apiMetas = (Array.isArray(vaultList) ? vaultList : []).map((v: any) => ({
           address:  (v.vaultAddress ?? v.vaultaddress ?? '').toLowerCase(),
@@ -865,21 +682,17 @@ async function fetchKuru(user: string): Promise<any[]> {
           quoteDec: Number(v.quoteToken?.decimal ?? v.quotetoken?.decimal ?? 6),
         })).filter((m: VaultMeta) => m.address)
       }
-    } catch { /* API unavailable — use legacy list only */ }
+    } catch { /* use legacy only */ }
 
-    // Merge API list with legacy vaults (deduplicate by address)
-    const seen = new Set(apiMetas.map((m: VaultMeta) => m.address))
-    const legacyExtra = KURU_LEGACY_VAULTS.filter(v => !seen.has(v.address.toLowerCase()))
-    const metas: VaultMeta[] = [...apiMetas, ...legacyExtra]
-
+    const seen  = new Set(apiMetas.map((m: VaultMeta) => m.address))
+    const metas = [...apiMetas, ...KURU_LEGACY_VAULTS.filter(v => !seen.has(v.address.toLowerCase()))]
     if (!metas.length) return []
 
-    // Batch RPC: balanceOf(user), totalSupply, NAV for each vault
     const calls: any[] = []
     metas.forEach((m, i) => {
       calls.push(ethCall(m.address, balanceOfData(user), 900 + i * 3))
-      calls.push(ethCall(m.address, '0x18160ddd',        901 + i * 3))  // totalSupply
-      calls.push(ethCall(m.address, KURU_NAV_SEL,        902 + i * 3))  // NAV in quote token
+      calls.push(ethCall(m.address, '0x18160ddd',        901 + i * 3))
+      calls.push(ethCall(m.address, KURU_NAV_SEL,        902 + i * 3))
     })
     const results = await rpcBatch(calls)
 
@@ -889,115 +702,81 @@ async function fetchKuru(user: string): Promise<any[]> {
       if (shares === 0n) return
       const totalSupply = decodeUint(results.find((r: any) => Number(r.id) === 901 + i * 3)?.result ?? '0x')
       if (totalSupply === 0n) return
-
-      // NAV raw is in the second 32-byte slot of the return data (offset 1)
-      // 0xe04d89da returns a struct — slot[0] is something else, slot[1] is the NAV
       const navRaw_res = results.find((r: any) => Number(r.id) === 902 + i * 3)?.result ?? '0x'
       const navRaw = navRaw_res && navRaw_res.length >= 130
-        ? BigInt('0x' + navRaw_res.slice(66, 130))  // slot[1]
+        ? BigInt('0x' + navRaw_res.slice(66, 130))
         : decodeUint(navRaw_res)
-
       if (navRaw === 0n) return
-
-      // amountUSD = (userShares / totalSupply) × (navRaw / 10^quoteDec)
-      const userFrac  = Number(shares)  / Number(totalSupply)
-      const navUSD    = Number(navRaw)  / Math.pow(10, m.quoteDec)
-      const amountUSD = userFrac * navUSD
+      const amountUSD = (Number(shares) / Number(totalSupply)) * (Number(navRaw) / Math.pow(10, m.quoteDec))
       if (amountUSD < 0.01) return
-
       items.push({
         protocol: 'Kuru', type: 'liquidity', logo: '🌀',
-        url:   `https://www.kuru.io/vaults/${m.address}`, chain: 'Monad',
+        url: `https://www.kuru.io/vaults/${m.address}`, chain: 'Monad',
         label: m.name, tokens: [m.base, m.quote],
         amountUSD, apy: 0, netValueUSD: amountUSD, inRange: null,
       })
     })
     return items
-  } catch (e: any) { console.error('[defi] fetchKuru error:', e?.message ?? String(e)); return [] }
+  } catch (e: any) { console.error('[defi][Kuru]', e?.message ?? e); return [] }
 }
 
-// ─── CURVANCE ─────────────────────────────────────────────────────────────────────────────
+// ─── CURVANCE ─────────────────────────────────────────────────────────────────
 // No on-chain registry exposes all Curvance cTokens.
-// Seed list + 'entered markets' from market manager covers all known positions.
-// New markets: add cToken address to CURVANCE_CTOKENS_SEED.
-const CURVANCE_MARKET_MGR = '0x1310f352f1389969ece6741671c4b919523912ff'
-
+// Seed list covers all known markets. New markets: add cToken address here.
 const CURVANCE_CTOKENS_SEED = [
   '0x1e240e30e51491546dec3af16b0b4eac8dd110d4',  // cWMON
-  '0xD9E2025b907E95EcC963A5018f56B87575B4aB26',  // caprMON
-  '0x926C101Cf0a3dE8725Eb24a93E980f9FE34d6230',  // cshMON
-  '0x494876051B0E85dCe5ecd5822B1aD39b9660c928',  // csMON
+  '0xd9e2025b907e95ecc963a5018f56b87575b4ab26',  // caprMON
+  '0x926c101cf0a3de8725eb24a93e980f9fe34d6230',  // cshMON
+  '0x494876051b0e85dce5ecd5822b1ad39b9660c928',  // csMON
   '0x5ca6966543c0786f547446234492d2f11c82f11f',  // cgMON
 ]
+const CURVANCE_CTOKEN_NAMES: Record<string, string> = {
+  '0x1e240e30e51491546dec3af16b0b4eac8dd110d4': 'cWMON',
+  '0xd9e2025b907e95ecc963a5018f56b87575b4ab26': 'caprMON',
+  '0x926c101cf0a3de8725eb24a93e980f9fe34d6230': 'cshMON',
+  '0x494876051b0e85dce5ecd5822b1ad39b9660c928': 'csMON',
+  '0x5ca6966543c0786f547446234492d2f11c82f11f': 'cgMON',
+}
 
 async function fetchCurvance(user: string, monPrice: number): Promise<any[]> {
   try {
-    const userPadded = user.slice(2).toLowerCase().padStart(64, '0')
-
-    // Use only the seed list — skip market manager to avoid extra RPC round trip
-    // under concurrent load. Seed covers all known Curvance cTokens on Monad.
-    const allCtokens = CURVANCE_CTOKENS_SEED.map(a => a.toLowerCase())
-
-    // balanceOf + totalAssets + totalSupply — skip symbol() to reduce batch size
-    // symbol is decoded from the address lookup table below
+    // 15 calls: 5 cTokens × (balanceOf + totalAssets + totalSupply)
     const calls: any[] = []
-    allCtokens.forEach((addr, i) => {
+    CURVANCE_CTOKENS_SEED.forEach((addr, i) => {
       calls.push(ethCall(addr, balanceOfData(user), i * 3))
       calls.push(ethCall(addr, '0x01e1d114',         i * 3 + 1))  // totalAssets()
       calls.push(ethCall(addr, '0x18160ddd',         i * 3 + 2))  // totalSupply()
     })
-    // 15 calls total — fast single batch
     const results = await rpcBatch(calls, 12_000)
     const getR = (n: number) => results.find((r: any) => Number(r.id) === n)?.result ?? '0x'
 
     const positions: any[] = []
-    const allSymbols: string[] = ['WMON']
-
-    // Static symbol table for known seed cTokens
-    const CTOKEN_SYMBOLS: Record<string, string> = {
-      '0x1e240e30e51491546dec3af16b0b4eac8dd110d4': 'cWMON',
-      '0xd9e2025b907e95ecc963a5018f56b87575b4ab26': 'caprMON',
-      '0x926c101cf0a3de8725eb24a93e980f9fe34d6230': 'cshMON',
-      '0x494876051b0e85dce5ecd5822b1ad39b9660c928': 'csMON',
-      '0x5ca6966543c0786f547446234492d2f11c82f11f': 'cgMON',
-    }
-
-    allCtokens.forEach((addr, i) => {
+    CURVANCE_CTOKENS_SEED.forEach((addr, i) => {
       const sharesRaw = decodeUint(getR(i * 3))
       if (sharesRaw === 0n) return
       const assetsRaw = decodeUint(getR(i * 3 + 1))
       const supplyRaw = decodeUint(getR(i * 3 + 2))
       if (supplyRaw === 0n || assetsRaw === 0n) return
 
-      const symbol     = CTOKEN_SYMBOLS[addr] ?? 'c' + addr.slice(2, 8)
+      const symbol     = CURVANCE_CTOKEN_NAMES[addr] ?? ('c' + addr.slice(2, 8))
       const underlying = symbol.startsWith('c') ? symbol.slice(1) : 'WMON'
-
-      // ERC4626: user assets = (shares / totalSupply) * totalAssets
       const userAssets = Number(sharesRaw) / Number(supplyRaw) * Number(assetsRaw) / 1e18
       if (userAssets < 0.001) return
 
-      if (!allSymbols.includes(underlying)) allSymbols.push(underlying)
-      positions.push({ symbol, underlying, userAssets })
-    })
+      // Use monPrice directly — no extra price fetch needed for MON-denominated assets
+      const price     = (underlying === 'USDC' || underlying === 'AUSD' || underlying === 'USDT') ? 1 : monPrice
+      const amountUSD = userAssets * (price || 0.024)
+      if (amountUSD < 0.01) return
 
-    if (!positions.length) return []
-
-    // Use monPrice passed from caller (already fetched) — avoids a second price call
-    // and prevents positions being filtered out if priceCache fails
-    const prices = await getTokenPricesUSD(allSymbols)
-    const effectiveMonPrice = (prices['WMON'] ?? prices['MON'] ?? 0) || monPrice
-
-    return positions.map(p => {
-      const price     = prices[p.underlying] ?? effectiveMonPrice
-      const amountUSD = p.userAssets * (price || effectiveMonPrice || 0.024)  // never 0
-      return {
+      positions.push({
         protocol: 'Curvance', type: 'vault', logo: '💎',
         url: 'https://monad.curvance.com', chain: 'Monad',
-        label: p.symbol || p.underlying, asset: p.underlying,
-        amount: p.userAssets, amountUSD, apy: 0, netValueUSD: amountUSD,
-      }
-    }).filter(p => p.amountUSD >= 0.01)
-  } catch (e: any) { console.error('[defi] fetchCurvance error:', e?.message ?? String(e)); return [] }
+        label: symbol, asset: underlying,
+        amount: userAssets, amountUSD, apy: 0, netValueUSD: amountUSD,
+      })
+    })
+    return positions
+  } catch (e: any) { console.error('[defi][Curvance]', e?.message ?? e); return [] }
 }
 
 // ─── EULER V2 ─────────────────────────────────────────────────────────────────
@@ -1005,9 +784,7 @@ async function fetchEulerV2(user: string): Promise<any[]> {
   const query = `query($account:String!,$chainId:Int!){
     userPositions(where:{account:$account,chainId:$chainId}){
       vault{address name asset{symbol decimals}}
-      supplyShares supplyAssetsUsd
-      borrowShares borrowAssetsUsd
-      healthScore
+      supplyShares supplyAssetsUsd borrowShares borrowAssetsUsd healthScore
     }
   }`
   try {
@@ -1024,28 +801,21 @@ async function fetchEulerV2(user: string): Promise<any[]> {
       .map((p: any) => {
         const supUSD = Number(p.supplyAssetsUsd ?? 0)
         const borUSD = Number(p.borrowAssetsUsd ?? 0)
-        const sym = p.vault?.asset?.symbol ?? '?'
+        const sym    = p.vault?.asset?.symbol ?? '?'
         return {
           protocol: 'Euler V2', type: 'lending', logo: '📐',
           url: 'https://app.euler.finance', chain: 'Monad', label: p.vault?.name ?? sym,
           supply: supUSD > 0.01 ? [{ symbol: sym, amountUSD: supUSD }] : [],
-          collateral: [],
-          borrow: borUSD > 0.01 ? [{ symbol: sym, amountUSD: borUSD }] : [],
+          collateral: [], borrow: borUSD > 0.01 ? [{ symbol: sym, amountUSD: borUSD }] : [],
           totalCollateralUSD: supUSD, totalDebtUSD: borUSD,
           netValueUSD: supUSD - borUSD,
           healthFactor: p.healthScore ? Number(p.healthScore) : null,
         }
       })
-  } catch (e: any) { console.error('[defi] fetcher error:', e?.message ?? String(e)); return [] }
+  } catch (e: any) { console.error('[defi][EulerV2]', e?.message ?? e); return [] }
 }
 
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
-// ─── UNIFIED APR INJECTION ───────────────────────────────────────────────────
-// Builds a protocol+tokens → APR lookup map.
-// Sources (in order of preference):
-//   1. aprCache populated by best-aprs/route.ts (zero-latency when warm)
-//   2. Direct Merkl API fetch when cache is cold (first visit to /defi)
-
+// ─── APR INJECTION ────────────────────────────────────────────────────────────
 type AprLookup = Map<string, number>
 
 function entriesToLookup(entries: Array<{ protocol: string; tokens: string[]; label: string; apr: number }>): AprLookup {
@@ -1065,17 +835,15 @@ function entriesToLookup(entries: Array<{ protocol: string; tokens: string[]; la
   return map
 }
 
-const MERKL_BASE = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=100'
-const MERKL_TTL  = 3 * 60 * 1000
-
-let merklAprCache: { map: AprLookup; ts: number } | null = null
-
+const MERKL_BASE      = 'https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=100'
+const MERKL_TTL       = 3 * 60 * 1000
 const MERKL_PROTO_MAP: Record<string, string> = {
   curve: 'Curve', uniswap: 'Uniswap V3', pancakeswap: 'PancakeSwap V3',
   morpho: 'Morpho', kintsu: 'Kintsu', magma: 'Magma', shmonad: 'shMonad',
   lagoon: 'Lagoon', kuru: 'Kuru', gearbox: 'GearBox V3', curvance: 'Curvance',
   neverland: 'Neverland', euler: 'Euler V2', upshift: 'Upshift',
 }
+let merklAprCache: { map: AprLookup; ts: number } | null = null
 
 async function fetchMerklAprs(): Promise<AprLookup> {
   if (merklAprCache && Date.now() - merklAprCache.ts < MERKL_TTL) return merklAprCache.map
@@ -1086,26 +854,18 @@ async function fetchMerklAprs(): Promise<AprLookup> {
         headers: { 'Accept': 'application/json' },
       }).then(r => r.ok ? r.json() : null).catch(() => null)
     ))
-    const raw: any[] = pages.flatMap(r => {
-      if (!r) return []
-      return Array.isArray(r) ? r : (r?.data ?? r?.opportunities ?? [])
-    })
+    const raw: any[] = pages.flatMap(r => !r ? [] : (Array.isArray(r) ? r : (r?.data ?? r?.opportunities ?? [])))
     if (!raw.length) return new Map()
-
     const entries = raw.flatMap((opp: any) => {
-      const rawProto = ((opp.mainProtocol ?? opp.protocol) ?? '').toLowerCase()
-      const proto    = MERKL_PROTO_MAP[rawProto] ?? ''
+      const proto = MERKL_PROTO_MAP[((opp.mainProtocol ?? opp.protocol) ?? '').toLowerCase()] ?? ''
       if (!proto) return []
       const apr = Number(opp.apr ?? 0)
       if (apr <= 0) return []
       const tokens: string[] = (opp.tokens ?? [])
         .filter((t: any) => t.type === 'TOKEN' && !String(t.symbol ?? '').endsWith('-gauge'))
-        .map((t: any) => String(t.symbol ?? ''))
-        .filter(Boolean)
-      const label = String(opp.name ?? opp.identifier ?? tokens.join('/') ?? '')
-      return [{ protocol: proto, tokens, label, apr }]
+        .map((t: any) => String(t.symbol ?? '')).filter(Boolean)
+      return [{ protocol: proto, tokens, label: String(opp.name ?? opp.identifier ?? ''), apr }]
     })
-
     const map = entriesToLookup(entries)
     merklAprCache = { map, ts: Date.now() }
     return map
@@ -1113,30 +873,20 @@ async function fetchMerklAprs(): Promise<AprLookup> {
 }
 
 async function buildAprLookup(): Promise<AprLookup> {
-  // Fast path: aprCache warm (best-aprs was called first) — zero latency
   const cached = getAprEntries()
   if (cached) return entriesToLookup(cached)
-
-  // Cold path: fetch Merkl directly for the most common protocols.
-  // aprCache will warm up once the user visits the Best APRs page.
   return fetchMerklAprs()
 }
 
 function lookupApr(map: AprLookup, pos: any): number {
   const proto  = String(pos.protocol ?? '')
   const tokens: string[] = pos.tokens ?? (pos.asset ? [pos.asset] : [])
-
   if (tokens.length > 0) {
     const k = proto + ':' + tokens.slice().sort().join('+')
     if (map.has(k)) return map.get(k)!
   }
-
   const label = String(pos.label ?? pos.asset ?? '').toLowerCase().trim()
-  if (label) {
-    const k = proto + ':' + label
-    if (map.has(k)) return map.get(k)!
-  }
-
+  if (label) { const k = proto + ':' + label; if (map.has(k)) return map.get(k)! }
   return map.get(proto) ?? 0
 }
 
@@ -1144,47 +894,41 @@ function injectBestAprs(positions: any[], map: AprLookup): any[] {
   return positions.map(pos => {
     if ((pos.apy ?? 0) > 0) return pos
     const apr = lookupApr(map, pos)
-    if (apr <= 0) return pos
-    return { ...pos, apy: apr }
+    return apr > 0 ? { ...pos, apy: apr } : pos
   })
 }
 
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address')
   if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
     return NextResponse.json({ error: 'Invalid address' }, { status: 400 })
   }
-
   const debugMode = req.nextUrl.searchParams.get('debug') === '1'
 
   const [monPriceR] = await Promise.allSettled([getMonPrice()])
-  const MON_PRICE = monPriceR.status === 'fulfilled' ? (monPriceR.value as number) : 0
+  const MON_PRICE   = monPriceR.status === 'fulfilled' ? (monPriceR.value as number) : 0
 
-  // Wraps each fetcher: in debug mode exposes errors, otherwise silently returns []
   async function safeFetch(name: string, fn: () => Promise<any[]>): Promise<any[]> {
     try {
       return await fn()
     } catch (e: any) {
-      if (debugMode) {
-        return [{ __debugError: true, protocol: name, error: e?.message ?? String(e), stack: (e?.stack ?? '').slice(0, 400) }]
-      }
+      console.error(`[defi][${name}]`, e?.message ?? e)
+      if (debugMode) return [{ __debugError: true, protocol: name, error: e?.message ?? String(e), stack: (e?.stack ?? '').slice(0, 400) }]
       return []
     }
   }
 
-  // Fetchers run in parallel — loadBestAprs runs AFTER to avoid self-HTTP contention in CF Workers
-  const [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, kintsuR, magmaR, shmonadR, lagoonR, kuruR, curvanceR, eulerR] =
+  const [nevR, morphoR, uniR, pcakeR, curveR, gearR, upshiftR, lstsR, lagoonR, kuruR, curvanceR, eulerR] =
     await Promise.allSettled([
       safeFetch('Neverland',     () => fetchNeverland(address)),
       safeFetch('Morpho',        () => fetchMorpho(address)),
       safeFetch('UniswapV3',     () => fetchUniswapV3(address, 'Uniswap V3',    UNI_NFT_PM, UNI_FACTORY)),
       safeFetch('PancakeswapV3', () => fetchUniswapV3(address, 'PancakeSwap V3', '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364', '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865')),
       safeFetch('Curve',         () => fetchCurve(address)),
-      safeFetch('Gearbox',       () => fetchGearbox(address)),
+      safeFetch('Gearbox',       () => fetchGearbox(address, MON_PRICE)),
       safeFetch('Upshift',       () => fetchUpshift(address)),
-      safeFetch('Kintsu',        () => fetchKintsu(address, MON_PRICE)),
-      safeFetch('Magma',         () => fetchMagma(address, MON_PRICE)),
-      safeFetch('ShMonad',       () => fetchShMonad(address, MON_PRICE)),
+      safeFetch('MonLSTs',       () => fetchMonLSTs(address, MON_PRICE)),
       safeFetch('Lagoon',        () => fetchLagoon(address)),
       safeFetch('Kuru',          () => fetchKuru(address)),
       safeFetch('Curvance',      () => fetchCurvance(address, MON_PRICE)),
@@ -1195,50 +939,40 @@ export async function GET(req: NextRequest) {
     return r.status === 'fulfilled' ? r.value : []
   }
 
-  // Debug: expose per-fetcher results when ?debug=1
+  // Split MonLSTs back into individual protocols for display
+  const lstPositions = unwrap(lstsR)
+  const kintsuR_pos  = lstPositions.filter(p => p.protocol === 'Kintsu')
+  const magmaR_pos   = lstPositions.filter(p => p.protocol === 'Magma')
+  const shmonadR_pos = lstPositions.filter(p => p.protocol === 'shMonad')
+
   if (debugMode) {
-    const named = [
-      ['Neverland',    nevR],    ['Morpho',      morphoR],
-      ['UniswapV3',    uniR],    ['PancakeswapV3', pcakeR],
-      ['Curve',        curveR],  ['Gearbox',     gearR],
-      ['Upshift',      upshiftR],['Kintsu',       kintsuR],
-      ['Magma',        magmaR],  ['ShMonad',      shmonadR],
-      ['Lagoon',       lagoonR], ['Kuru',         kuruR],
-      ['Curvance',     curvanceR],['EulerV2',     eulerR],
-    ] as [string, PromiseSettledResult<any[]>][]
+    const named: [string, PromiseSettledResult<any[]>][] = [
+      ['Neverland', nevR], ['Morpho', morphoR], ['UniswapV3', uniR], ['PancakeswapV3', pcakeR],
+      ['Curve', curveR], ['Gearbox', gearR], ['Upshift', upshiftR],
+      ['Kintsu',  { status: 'fulfilled', value: kintsuR_pos  }],
+      ['Magma',   { status: 'fulfilled', value: magmaR_pos   }],
+      ['ShMonad', { status: 'fulfilled', value: shmonadR_pos }],
+      ['Lagoon', lagoonR], ['Kuru', kuruR], ['Curvance', curvanceR], ['EulerV2', eulerR],
+    ]
     return NextResponse.json({
-      __debug: true,
-      monPrice: MON_PRICE,
+      __debug: true, monPrice: MON_PRICE,
       fetchers: named.map(([name, r]) => ({
-        name,
-        status: r.status,
-        count: r.status === 'fulfilled' ? r.value.length : 0,
+        name, status: r.status,
+        count:     r.status === 'fulfilled' ? r.value.length : 0,
         positions: r.status === 'fulfilled' ? r.value : [],
-        error: r.status === 'rejected' ? String(r.reason) : null,
+        error:     r.status === 'rejected'  ? String(r.reason) : null,
       })),
     })
   }
 
   let allPositions = [
     ...unwrap(nevR), ...unwrap(morphoR), ...unwrap(uniR), ...unwrap(pcakeR),
-    ...unwrap(curveR), ...unwrap(gearR), ...unwrap(upshiftR),
-    ...unwrap(kintsuR), ...unwrap(magmaR), ...unwrap(shmonadR),
+    ...unwrap(curveR), ...unwrap(gearR), ...unwrap(upshiftR), ...lstPositions,
     ...unwrap(lagoonR), ...unwrap(kuruR), ...unwrap(curvanceR), ...unwrap(eulerR),
   ]
 
-  // Inject APRs: uses aprCache if warm, falls back to direct Merkl fetch
   const bestAprsMap = await buildAprLookup()
   allPositions = injectBestAprs(allPositions, bestAprsMap)
-
-  // Pos-processamento: Gearbox WMON precisa do preco do MON
-  allPositions = allPositions.map(p => {
-    if (p._needsMonPrice && MON_PRICE > 0) {
-      const usd = p._expectedLiqPerShare * p.shares * MON_PRICE
-      return { ...p, amountUSD: usd, netValueUSD: usd, _needsMonPrice: undefined, _expectedLiqPerShare: undefined, shares: undefined }
-    }
-    const { _needsMonPrice, _expectedLiqPerShare, shares: _s, ...clean } = p
-    return clean
-  })
 
   const totalNetValueUSD = allPositions.reduce((s, p) => s + (p.netValueUSD ?? 0), 0)
   const totalDebtUSD     = allPositions.reduce((s, p) => s + (p.totalDebtUSD ?? 0), 0)
