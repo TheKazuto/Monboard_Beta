@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { SORA } from '@/lib/styles'
+import { fmtTokenPrice } from '@/lib/format'
 import { TrendingUp, TrendingDown } from 'lucide-react'
 
 interface Gainer {
@@ -14,19 +15,8 @@ interface Gainer {
   imageUrl: string | null
 }
 
-// Module-level cache
 const CACHE_TTL = 3 * 60 * 1000
 let cached: { data: Gainer[]; ts: number } | null = null
-
-function formatPrice(p: number): string {
-  if (p === 0) return '$0'
-  if (p < 0.000001) return `$${p.toExponential(1)}`
-  if (p < 0.0001) return `$${p.toFixed(6)}`
-  if (p < 0.01) return `$${p.toFixed(4)}`
-  if (p < 1) return `$${p.toFixed(3)}`
-  if (p < 1000) return `$${p.toFixed(2)}`
-  return `$${p.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
-}
 
 function formatChange(c: number): string {
   const sign = c >= 0 ? '+' : ''
@@ -146,7 +136,7 @@ function TokenRow({ token, rank }: { token: Gainer; rank: number }) {
         <p className="text-sm font-semibold text-gray-800 dark-token-name truncate group-hover:text-violet-600 transition-colors">
           {token.symbol}
         </p>
-        <p className="text-xs text-gray-400">{formatPrice(token.priceUsd)}</p>
+        <p className="text-xs text-gray-400">{fmtTokenPrice(token.priceUsd)}</p>
       </div>
 
       {/* 24h change badge */}

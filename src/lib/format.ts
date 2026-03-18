@@ -35,6 +35,27 @@ export function fmtUSD(v: number): string {
 }
 
 /**
+ * Format a token spot price with high precision for small values.
+ * Used by TopTokens and TopEarners — replaces their local formatPrice() copies.
+ *
+ * Examples:
+ *   fmtTokenPrice(0.00000042) → '$4.20e-7'
+ *   fmtTokenPrice(0.0038)     → '$0.003800'
+ *   fmtTokenPrice(0.75)       → '$0.7500'
+ *   fmtTokenPrice(3.14)       → '$3.14'
+ *   fmtTokenPrice(42000)      → '$42,000.00'
+ */
+export function fmtTokenPrice(p: number): string {
+  if (p === 0) return '$0.00'
+  if (p < 0.000001) return `$${p.toExponential(2)}`
+  if (p < 0.0001)   return `$${p.toFixed(7)}`
+  if (p < 0.01)     return `$${p.toFixed(5)}`
+  if (p < 1)        return `$${p.toFixed(4)}`
+  if (p < 1000)     return `$${p.toFixed(2)}`
+  return `$${p.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+}
+
+/**
  * Format a token balance with appropriate precision.
  *
  * Examples:

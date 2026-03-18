@@ -16,14 +16,19 @@ const WINDOW_MS = 60_000  // 1-minute sliding window
 
 // Per-route limits (requests per window per IP)
 const ROUTE_LIMITS: Record<string, number> = {
-  '/api/approvals-logs': 10,  // Etherscan paid API — strict
-  '/api/nfts':           10,  // OpenSea API — strict
-  '/api/defi':           15,  // many RPC calls per request
-  '/api/best-aprs':      12,  // calls many external APIs
-  '/api/transactions':   20,
+  '/api/approvals-logs':   10,  // Etherscan paid API — strict
+  '/api/nfts':             10,  // OpenSea API — strict
+  '/api/defi':             15,  // many RPC calls per request
+  '/api/best-aprs':        12,  // calls many external APIs
+  '/api/transactions':     20,
   '/api/portfolio-history': 20,
-  '/api/token-exposure': 30,
-  default:               60,
+  '/api/token-exposure':   30,
+  // Debug/internal routes — very strict, should be removed before final deploy
+  '/api/debug-protocols':  3,
+  '/api/debug-kuru':       3,
+  '/api/debug-upshift':    3,
+  '/api/scan-protocol':    3,
+  default:                 60,
 }
 
 function getLimit(pathname: string): number {

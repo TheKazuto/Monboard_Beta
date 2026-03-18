@@ -345,88 +345,6 @@ async function fetchUpshift(user: string): Promise<any[]> {
   } catch (e: any) { console.error('[defi][Upshift]', e?.message ?? e); return [] }
 }
 
-// ─── EULER V2 ─────────────────────────────────────────────────────────────────
-// Uses the REST indexer (replaces the blocked GraphQL endpoint).
-// Two calls:
-//   1. /v2/vault/list     → vault metadata (name, assetSymbol, assetDecimals, assetPrice, supplyApy)
-//   2. /v2/account/positions → user balances (assets, borrowed per vault)
-const EULER_INDEXER   = 'https://indexer-prod.euler.finance/v2'
-// Server-side vault metadata cache (10 min) — shared across users, reduces calls
-let eulerVaultCache: { map: Map<string, any>; ts: number } | null = null
-const EULER_VAULT_TTL = 10 * 60 * 1000
-
-async function getEulerVaultMap(): Promise<Map<string, any>> {
-  if (eulerVaultCache && Date.now() - eulerVaultCache.ts < EULER_VAULT_TTL) {
-    return eulerVaultCache.map
-  }
-  const map = new Map<string, any>()
-  try {
-    // Fetch up to 200 vaults (77 currently on Monad) in one request
-    const res = await fetchThrottled(`${EULER_INDEXER}/vault/list?chainId=143&take=200`, {
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
-    })
-    if (!res.ok) return map
-    const items: any[] = (await res.json())?.items ?? []
-    for (const v of items) {
-      map.set((v.vault ?? '').toLowerCase(), v)
-    }
-    eulerVaultCache = { map, ts: Date.now() }
-  } catch { /* return empty map */ }
-  return map
-}
-
-async function fetchEulerV2(user: string): Promise<any[]> {
-  try {
-    // Fetch vault map and user positions in parallel (2 HTTP calls via httpSem)
-    const [vaultMap, posRes] = await Promise.all([
-      getEulerVaultMap(),
-      fetchThrottled(`${EULER_INDEXER}/account/positions?chainId=143&address=${user}`, {
-        signal: AbortSignal.timeout(10_000), cache: 'no-store',
-      }),
-    ])
-    if (!posRes.ok) return []
-    const data     = await posRes.json()
-    // Response key is the checksummed user address — find it case-insensitively
-    const key      = Object.keys(data).find(k => k.toLowerCase() === user.toLowerCase()) ?? ''
-    const savings  = data[key]?.savings ?? {}
-
-    const positions: any[] = []
-    for (const [vaultAddr, s] of Object.entries(savings) as [string, any][]) {
-      const assetsRaw   = BigInt(s.assets   ?? '0')
-      const borrowedRaw = BigInt(s.borrowed ?? '0')
-      if (assetsRaw === 0n && borrowedRaw === 0n) continue
-
-      const vaultMeta   = vaultMap.get(vaultAddr.toLowerCase())
-      const assetSym    = vaultMeta?.assetSymbol   ?? '?'
-      const assetDec    = Number(vaultMeta?.assetDecimals ?? 18)
-      const assetPrice  = Number(vaultMeta?.assetPrice    ?? 0)
-      const vaultName   = vaultMeta?.vaultName ?? `Euler ${assetSym}`
-      const supplyApy   = Number(vaultMeta?.supplyApy?.totalApy ?? 0)
-
-      const supplyAmt   = Number(assetsRaw)   / Math.pow(10, assetDec)
-      const borrowAmt   = Number(borrowedRaw) / Math.pow(10, assetDec)
-      const supUSD      = supplyAmt * assetPrice
-      const borUSD      = borrowAmt * assetPrice
-
-      if (supUSD < 0.01 && borUSD < 0.01) continue
-
-      positions.push({
-        protocol: 'Euler V2', type: 'lending', logo: '📐',
-        url: `https://app.euler.finance/vault/${vaultAddr}?network=monad`, chain: 'Monad',
-        label: vaultName,
-        supply:     supUSD > 0.01 ? [{ symbol: assetSym, amount: supplyAmt, amountUSD: supUSD }] : [],
-        collateral: [],
-        borrow:     borUSD > 0.01 ? [{ symbol: assetSym, amount: borrowAmt, amountUSD: borUSD }] : [],
-        totalCollateralUSD: supUSD, totalDebtUSD: borUSD,
-        netValueUSD: supUSD - borUSD,
-        healthFactor: null,  // available via liquidityInfo if needed
-        apy: supplyApy,
-      })
-    }
-    return positions
-  } catch (e: any) { console.error('[defi][EulerV2]', e?.message ?? e); return [] }
-}
-
 // ─── UNISWAP V3 / PANCAKESWAP V3 ─────────────────────────────────────────────
 const UNI_NFT_PM  = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53'
 const UNI_FACTORY = '0x204faca1764b154221e35c0d20abb3c525710498'
@@ -598,67 +516,6 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
   } catch (e: any) { console.error('[defi][UniswapV3]', e?.message ?? e); return [] }
 }
 
-// ─── MIDAS (mHYPER, mEDGE on Monad) ──────────────────────────────────────────
-// Midas tokens are USD-denominated yield-bearing ERC-20s.
-// API returns APY; balance via on-chain balanceOf; price ≈ $1 (stable by design).
-const MIDAS_API = 'https://api-prod.midas.app/api/marketplace/products'
-const MIDAS_TOKENS: Array<{ symbol: string; address: string; name: string }> = [
-  { symbol: 'mHYPER', address: '0xd90F6bFEd23fFDE40106FC4498DD2e9EDB95E4e7', name: 'Midas Hyperithm' },
-  { symbol: 'mEDGE',  address: '0x1c8eE940B654bFCeD403f2A44C1603d5be0F50Fa', name: 'Midas mEDGE'     },
-]
-
-async function fetchMidas(user: string): Promise<any[]> {
-  try {
-    // 1. Fetch APYs from Midas API + balances in parallel
-    const [apiRes, balResults] = await Promise.all([
-      fetchThrottled(MIDAS_API, {
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-          'Origin': 'https://app.midas.app',
-          'Referer': 'https://app.midas.app/',
-        },
-        signal: AbortSignal.timeout(10_000),
-        cache: 'no-store',
-      }),
-      rpcBatchThrottled(
-        MIDAS_TOKENS.map((t, i) => ethCall(t.address, balanceOfData(user), i + 800))
-      ),
-    ])
-
-    // 2. Build APY map from API response
-    const apyMap: Record<string, number> = {}
-    if (apiRes.ok) {
-      const data = await apiRes.json()
-      for (const p of (data?.products ?? [])) {
-        if (p?.addresses?.['evm:monad']) {
-          apyMap[p.addresses['evm:monad'].toLowerCase()] = Number(p?.apy?.value7d ?? 0) * 100
-        }
-      }
-    }
-
-    // 3. Build positions
-    const positions: any[] = []
-    for (let i = 0; i < MIDAS_TOKENS.length; i++) {
-      const t      = MIDAS_TOKENS[i]
-      const raw    = balResults.find((r: any) => Number(r.id) === i + 800)?.result ?? '0x'
-      const shares = decodeUint(raw)
-      if (shares === 0n) continue
-      const amount    = Number(shares) / 1e18
-      const amountUSD = amount  // price = $1 (USD-denominated)
-      if (amountUSD < 0.01) continue
-      const apy = apyMap[t.address.toLowerCase()] ?? 0
-      positions.push({
-        protocol: 'Midas', type: 'vault', logo: '🏦',
-        url: 'https://app.midas.app', chain: 'Monad',
-        label: t.name, asset: t.symbol,
-        amount, amountUSD, apy, netValueUSD: amountUSD,
-      })
-    }
-    return positions
-  } catch (e: any) { console.error('[defi][Midas]', e?.message ?? e); return [] }
-}
-
 // ─── APR INJECTION ────────────────────────────────────────────────────────────
 type AprLookup = Map<string, number>
 
@@ -772,13 +629,23 @@ function injectBestAprs(positions: any[], map: AprLookup): any[] {
 // IN-FLIGHT (promise exists): await in-flight → deduplicated, no extra Zerion call
 const DEFI_CACHE_TTL  = 3 * 60 * 1000   // fresh window: 3 min
 const DEFI_STALE_TTL  = 10 * 60 * 1000  // serve stale up to 10 min, revalidate async
+const DEFI_CACHE_MAX  = 100             // cap entries to avoid unbounded memory growth
 interface DefiCacheEntry { result: any; fetchedAt: number; promise: Promise<any> | null }
 const defiCache = new Map<string, DefiCacheEntry>()
 
+function defiCacheSet(key: string, entry: DefiCacheEntry): void {
+  // Evict oldest entry when at capacity (simple FIFO)
+  if (defiCache.size >= DEFI_CACHE_MAX && !defiCache.has(key)) {
+    const firstKey = defiCache.keys().next().value
+    if (firstKey) defiCache.delete(firstKey)
+  }
+  defiCache.set(key, entry)
+}
+
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 async function fetchDefiForAddress(address: string, debugMode: boolean, origin?: string): Promise<any> {
-  const [monPriceR] = await Promise.allSettled([getMonPrice()])
-  const MON_PRICE   = monPriceR.status === 'fulfilled' ? (monPriceR.value as number) : 0
+  // Simplified: getMonPrice already handles caching internally
+  const MON_PRICE = await getMonPrice().catch(() => 0)
 
   function safeFetch(name: string, fn: () => Promise<any[]>): Promise<any[]> {
     return fn().catch((e: any) => { console.error(`[defi][${name}]`, e?.message ?? e); return [] })
@@ -868,30 +735,30 @@ export async function GET(req: NextRequest) {
     // STALE: serve stale immediately and kick off background revalidation
     if (entry?.result && age < DEFI_STALE_TTL) {
       const bgPromise = fetchDefiForAddress(address, false, new URL(req.url).origin)
-        .then(result  => { defiCache.set(key, { result, fetchedAt: Date.now(), promise: null }) })
-        .catch(()     => { const e = defiCache.get(key); if (e) defiCache.set(key, { ...e, promise: null }) })
-      defiCache.set(key, { ...entry, promise: bgPromise as any })
+        .then(result  => { defiCacheSet(key, { result, fetchedAt: Date.now(), promise: null }) })
+        .catch(()     => { const e = defiCache.get(key); if (e) defiCacheSet(key, { ...e, promise: null }) })
+      defiCacheSet(key, { ...entry, promise: bgPromise as any })
       return NextResponse.json(entry.result)
     }
   }
 
   // EMPTY: first visit — must block until we have data
   const origin  = new URL(req.url).origin
-  const promise  = fetchDefiForAddress(address, debugMode, debugMode ? undefined : origin)
+  const promise = fetchDefiForAddress(address, debugMode, debugMode ? undefined : origin)
 
   if (!debugMode) {
     const existing = defiCache.get(key)
-    defiCache.set(key, { result: existing?.result ?? null, fetchedAt: existing?.fetchedAt ?? 0, promise })
+    defiCacheSet(key, { result: existing?.result ?? null, fetchedAt: existing?.fetchedAt ?? 0, promise })
   }
 
   try {
     const result = await promise
-    if (!debugMode) defiCache.set(key, { result, fetchedAt: Date.now(), promise: null })
+    if (!debugMode) defiCacheSet(key, { result, fetchedAt: Date.now(), promise: null })
     return NextResponse.json(result)
   } catch (e: any) {
     if (!debugMode) {
       const existing = defiCache.get(key)
-      if (existing) defiCache.set(key, { ...existing, promise: null })
+      if (existing) defiCacheSet(key, { ...existing, promise: null })
       if (existing?.result) return NextResponse.json(existing.result)
     }
     console.error('[defi] fatal error:', e?.message ?? e)

@@ -132,8 +132,9 @@ export default function PortfolioHistory() {
   }, [stableAddress])
 
   // Fetch on range change (lazy — only if not already fetched)
+  // Uses stableAddress (not raw address) to avoid triggering during wagmi reconnect flicker
   useEffect(() => {
-    if (isConnected && address && !data[range] && !loading[range]) {
+    if (isConnected && stableAddress && !data[range] && !loading[range]) {
       fetchRange(range)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -221,19 +222,18 @@ export default function PortfolioHistory() {
             <div className={`flex items-center gap-1 mt-0.5 text-sm ${isPositive ? 'text-emerald-600' : 'text-red-500'}`}>
               {isPositive ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
               <span className="font-medium">
-                {isPositive ? '+' : ''}{current.change.toFixed(2)}% in period
+                {isPositive ? '+' : ''}{current.change.toFixed(2)}%
               </span>
-              {current.totalValue > 0 && (
-                <span className="text-gray-400 ml-1 text-xs">· {fmtUSD(current.totalValue)}</span>
-              )}
+              <span className="text-gray-400 text-xs">
+                · {fmtUSD(current.totalValue)}
+              </span>
             </div>
           )}
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => fetchRange(range, true)}
-            disabled={isLoading}
-            className="p-1 rounded-md text-gray-400 hover:text-violet-600 hover:bg-violet-50 transition-colors disabled:opacity-40"
+            className="p-1 rounded-md text-gray-400 hover:text-violet-600 hover:bg-violet-50 transition-colors"
             title="Refresh data"
           >
             <RefreshCw size={13} className={isLoading ? 'animate-spin text-violet-400' : ''} />

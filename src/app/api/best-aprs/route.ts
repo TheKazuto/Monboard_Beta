@@ -1126,7 +1126,8 @@ async function fetchAllData() {
   const lends  = all.filter(e => e.type === 'lend').sort(byApr).slice(0, 10)
 
   // Populate shared aprCache so defi/route.ts can inject APRs without HTTP self-calls
-  setAprCache(all.map(e => ({ protocol: e.protocol, tokens: e.tokens, label: e.label, apr: e.apr })))
+  const aprEntries = all.map(e => ({ protocol: e.protocol, tokens: e.tokens, label: e.label, apr: e.apr }))
+  setAprCache(aprEntries)
 
   return {
     stableAPRs,
@@ -1136,7 +1137,7 @@ async function fetchAllData() {
     lastUpdated: Date.now(),
     totalEntries: all.length,
     // Internal field — used by /api/defi for APR injection via ?format=entries
-    __entries: all.map(e => ({ protocol: e.protocol, tokens: e.tokens, label: e.label, apr: e.apr })),
+    __entries: aprEntries,
   }
 }
 

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { SORA } from '@/lib/styles'
-import { fmtUSD } from '@/lib/format'
+import { fmtUSD, fmtTokenPrice } from '@/lib/format'
 import { TrendingUp, TrendingDown, RefreshCw } from 'lucide-react'
 
 interface Token {
@@ -15,16 +15,6 @@ interface Token {
   market_cap_rank: number
   price_change_percentage_24h: number
   total_volume: number
-}
-
-function formatPrice(price: number): string {
-  if (price === 0 || price === null) return '$0.00'
-  if (price < 0.000001) return `$${price.toExponential(2)}`
-  if (price < 0.0001) return `$${price.toFixed(7)}`
-  if (price < 0.01) return `$${price.toFixed(5)}`
-  if (price < 1) return `$${price.toFixed(4)}`
-  if (price < 1000) return `$${price.toFixed(2)}`
-  return `$${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
 }
 
 export default function TopTokens() {
@@ -168,7 +158,7 @@ export default function TopTokens() {
 
                     {/* Price */}
                     <td className="py-2.5 text-right font-mono text-gray-700 text-xs sm:text-sm">
-                      {formatPrice(token.current_price)}
+                      {fmtTokenPrice(token.current_price)}
                     </td>
 
                     {/* Market cap */}
@@ -191,8 +181,7 @@ export default function TopTokens() {
                         }`}
                       >
                         {isPositive ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
-                        {isPositive ? '+' : ''}
-                        {change.toFixed(2)}%
+                        {isPositive ? '+' : ''}{change.toFixed(2)}%
                       </span>
                     </td>
                   </tr>
@@ -202,29 +191,6 @@ export default function TopTokens() {
           </table>
         </div>
       )}
-
-      {/* Footer */}
-      <div className="mt-4 pt-3 border-t border-gray-50 flex items-center justify-between">
-        <p className="text-xs text-gray-400">
-          Data via{' '}
-          <a
-            href="https://www.coingecko.com"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-violet-500 hover:text-violet-700"
-          >
-            CoinGecko
-          </a>
-        </p>
-        <a
-          href="https://www.coingecko.com/en/categories/monad-ecosystem"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-xs text-violet-500 hover:text-violet-700"
-        >
-          View all →
-        </a>
-      </div>
     </div>
   )
 }
