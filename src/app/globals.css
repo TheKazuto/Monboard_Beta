@@ -23,6 +23,7 @@
   --skeleton-mid: #e8e0fe;
   --scrollbar-track: #f5f3ff;
   --scrollbar-thumb: #c4b5fd;
+  --premium-overlay-bg: rgba(250, 249, 255, 0.93);
 }
 
 [data-theme="dark"] {
@@ -41,6 +42,7 @@
   --skeleton-mid: #262240;
   --scrollbar-track: #1a1728;
   --scrollbar-thumb: #4c1d95;
+  --premium-overlay-bg: rgba(15, 13, 26, 0.93);
 }
 
 * {
@@ -258,6 +260,11 @@ body {
 [data-theme="dark"] .bg-amber-50 { background-color: rgba(245, 158, 11, 0.08) !important; }
 [data-theme="dark"] .bg-red-50 { background-color: rgba(239, 68, 68, 0.08) !important; }
 
+/* Cyan backgrounds (LiquidityCard price area) */
+[data-theme="dark"] .bg-cyan-50 { background-color: rgba(6, 182, 212, 0.08) !important; }
+[data-theme="dark"] .bg-cyan-100 { background-color: rgba(6, 182, 212, 0.15) !important; }
+[data-theme="dark"] .text-cyan-700 { color: #67e8f9 !important; }
+
 /* Border overrides */
 [data-theme="dark"] .border-gray-50 { border-color: #1e1a2e !important; }
 [data-theme="dark"] .border-gray-100 { border-color: #262240 !important; }
@@ -270,6 +277,14 @@ body {
 [data-theme="dark"] .border-amber-200 { border-color: rgba(245, 158, 11, 0.25) !important; }
 [data-theme="dark"] .border-red-100 { border-color: rgba(239, 68, 68, 0.2) !important; }
 [data-theme="dark"] .border-red-200 { border-color: rgba(239, 68, 68, 0.25) !important; }
+[data-theme="dark"] .border-cyan-100 { border-color: rgba(6, 182, 212, 0.2) !important; }
+[data-theme="dark"] .border-cyan-200 { border-color: rgba(6, 182, 212, 0.3) !important; }
+
+/* Violet gradient (NFTGatingBanner) */
+[data-theme="dark"] .from-violet-50 { --tw-gradient-from: rgba(124, 58, 237, 0.15) !important; }
+[data-theme="dark"] .to-purple-50 { --tw-gradient-to: rgba(168, 85, 247, 0.10) !important; }
+[data-theme="dark"] .text-violet-900 { color: #c4b5fd !important; }
+[data-theme="dark"] .border-violet-200.bg-gradient-to-r { border-color: rgba(124, 58, 237, 0.3) !important; }
 
 /* Progress bar */
 [data-theme="dark"] .progress-bar { background: #1e1a2e; }
@@ -302,7 +317,6 @@ body {
 
 /* Swap modals */
 [data-theme="dark"] .shadow-2xl { box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5) !important; }
-
 
 /* APR badge text — white in dark mode for readability on colored backgrounds */
 [data-theme="dark"] .dark-badge-white { color: #ffffff !important; }
