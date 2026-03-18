@@ -330,7 +330,7 @@ export default function TransactionsPage() {
           <div className="card p-5 relative">
             {/* TODO: implement NFT gating — replace with dynamic check when collection launches */}
             <div className="absolute inset-0 rounded-2xl flex flex-col items-center justify-center z-10 text-center p-6"
-              style={{ background: 'rgba(250,249,255,0.93)', backdropFilter: 'blur(4px)' }}>
+              style={{ background: 'var(--premium-overlay-bg)', backdropFilter: 'blur(4px)' }}>
               <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center mb-3">
                 <Lock size={24} className="text-white" />
               </div>
@@ -371,7 +371,7 @@ export default function TransactionsPage() {
           <div className="card p-5 relative">
             {/* TODO: implement NFT gating */}
             <div className="absolute inset-0 rounded-2xl flex flex-col items-center justify-center z-10 text-center p-6"
-              style={{ background: 'rgba(250,249,255,0.93)', backdropFilter: 'blur(4px)' }}>
+              style={{ background: 'var(--premium-overlay-bg)', backdropFilter: 'blur(4px)' }}>
               <Lock size={20} className="text-violet-400 mb-2" />
               <p className="text-xs text-gray-500">Coming soon</p>
             </div>
