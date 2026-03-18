@@ -102,7 +102,8 @@ function SetupBanner() {
 NEXT_PUBLIC_TRANSAK_ENV=staging`}
         </pre>
         <p className="text-xs text-gray-400">
-          Staging funciona imediatamente sem aprovação. Para produção, submeta o KYB.
+          Staging funciona imediatamente sem aprovação.<br />
+          Para produção, submeta o KYB.
         </p>
       </div>
     </div>
@@ -149,6 +150,13 @@ export default function OnrampPage() {
         ) : !TRANSAK_API_KEY ? (
           <SetupBanner />
         ) : (
+          // Fix #6 (ALTO): Added sandbox attribute to limit iframe capabilities.
+          // allow-scripts    — required for Transak widget JS to run
+          // allow-forms      — required for KYC forms and payment input
+          // allow-same-origin — required for Transak to read its own cookies/storage
+          // allow-popups     — required to open card processor redirects
+          // allow-popups-to-escape-sandbox — required for OAuth redirects (Google Pay etc.)
+          // NOT included: allow-top-navigation (prevents iframe from redirecting the whole page)
           <iframe
             src={widgetUrl}
             title="Buy crypto with fiat — Transak"
@@ -156,6 +164,7 @@ export default function OnrampPage() {
             width="100%"
             className="border-0"
             allow="accelerometer; autoplay; camera; gyroscope; payment; microphone"
+            sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox"
             style={{ display: 'block' }}
           />
         )}

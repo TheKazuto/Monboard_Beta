@@ -1162,7 +1162,18 @@ export async function GET(req: NextRequest) {
     } catch { /* fall through to retry */ }
   }
 
-  const promise = fetchAllData()
+  // Fix #9 (MÉDIO): Global 25s timeout — prevents a slow external API (Merkl,
+  // Upshift, etc.) from hanging a Cloudflare Worker slot indefinitely.
+  // Individual fetchers already have AbortSignal timeouts, but Promise.allSettled
+  // can still block longer than expected if several are near their limits.
+  const fetchWithTimeout = () => Promise.race([
+    fetchAllData(),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('fetchAllData timeout')), 25_000)
+    ),
+  ])
+
+  const promise = fetchWithTimeout()
 
   serverCache = {
     data:      serverCache?.data ?? null,

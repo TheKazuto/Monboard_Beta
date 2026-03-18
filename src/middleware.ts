@@ -38,8 +38,12 @@ function getLimit(pathname: string): number {
   return ROUTE_LIMITS.default
 }
 
+// Fix #3 (ALTO): Prioritise cf-connecting-ip (Cloudflare's authoritative header)
+// to prevent IP spoofing via x-forwarded-for manipulation.
+// cf-connecting-ip is set by Cloudflare itself and cannot be spoofed by clients.
 function getClientIp(req: NextRequest): string {
   return (
+    req.headers.get('cf-connecting-ip') ??
     req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
     req.headers.get('x-real-ip') ??
     'unknown'
@@ -58,6 +62,14 @@ export function middleware(req: NextRequest) {
   const key   = `${ip}::${pathname}`
   const now   = Date.now()
   const limit = getLimit(pathname)
+
+  // Fix #10 (BAIXO): Evict expired entries when store grows too large to prevent
+  // unbounded memory growth in long-lived Worker instances.
+  if (store.size > 10_000) {
+    for (const [k, v] of store) {
+      if (now > v.resetAt) store.delete(k)
+    }
+  }
 
   const entry = store.get(key)
   if (!entry || now > entry.resetAt) {

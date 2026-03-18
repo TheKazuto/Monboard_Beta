@@ -6,6 +6,16 @@ export const revalidate = 0
 // ─── Security: SSRF protection for metadata fetching ─────────────────────────
 const PRIVATE_IP_RE = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|::1|fc00:|fd)/
 
+// Fix #7 (MÉDIO): Extended blocklist to include cloud metadata endpoints.
+// A malicious NFT metadata_url pointing to these would allow SSRF attacks
+// against cloud provider instance metadata services.
+const BLOCKED_HOSTNAMES = new Set([
+  'metadata.google.internal',
+  'metadata.internal',
+  '169.254.169.254',   // AWS/Azure/GCP link-local metadata
+  'instance-data',     // EC2 legacy metadata hostname
+])
+
 function isSafeMetaUrl(url: string): boolean {
   if (!url) return false
   try {
@@ -13,6 +23,12 @@ function isSafeMetaUrl(url: string): boolean {
     if (u.protocol !== 'https:') return false
     if (PRIVATE_IP_RE.test(u.hostname)) return false
     if (u.hostname === 'localhost' || u.hostname.endsWith('.local')) return false
+    // Block cloud metadata endpoints by hostname
+    if (BLOCKED_HOSTNAMES.has(u.hostname)) return false
+    // Block any subdomain of known metadata hosts
+    for (const blocked of BLOCKED_HOSTNAMES) {
+      if (u.hostname.endsWith('.' + blocked)) return false
+    }
     return true
   } catch { return false }
 }

@@ -368,7 +368,9 @@ function decodeAbiString(hex: string): string {
     if (d.length < 128) return ''
     const len = parseInt(d.slice(64, 128), 16)
     if (len === 0 || len > 100) return ''
-    return Buffer.from(d.slice(128, 128 + len * 2), 'hex').toString('utf8').replace(/\0/g, '').trim()
+    // Fix #5 (ALTO): Strip all ASCII control characters (not just null bytes).
+    // Prevents token symbols with embedded control chars from polluting UI or logs.
+    return Buffer.from(d.slice(128, 128 + len * 2), 'hex').toString('utf8').replace(/[\x00-\x1f\x7f]/g, '').trim()
   } catch { return '' }
 }
 
@@ -744,7 +746,19 @@ export async function GET(req: NextRequest) {
 
   // EMPTY: first visit — must block until we have data
   const origin  = new URL(req.url).origin
-  const promise = fetchDefiForAddress(address, debugMode, debugMode ? undefined : origin)
+
+  // Fix #9 (MÉDIO): Global 25s timeout — prevents a slow external API from
+  // hanging a Cloudflare Worker slot indefinitely (each fetch has its own
+  // timeout, but Promise.allSettled can still block if many are slow together).
+  const fetchWithTimeout = (addr: string, debug: boolean, orig: string | undefined) =>
+    Promise.race([
+      fetchDefiForAddress(addr, debug, orig),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('fetchDefiForAddress timeout')), 25_000)
+      ),
+    ])
+
+  const promise = fetchWithTimeout(address, debugMode, debugMode ? undefined : origin)
 
   if (!debugMode) {
     const existing = defiCache.get(key)

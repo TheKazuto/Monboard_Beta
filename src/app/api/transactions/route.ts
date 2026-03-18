@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
   // ── PATH 1: Etherscan V2 (if API key is set) ────────────────────────────────
   if (apiKey && apiKey !== 'YourApiKeyToken') {
     try {
-      // Fix #5 (ALTO): Use URL object so apiKey is set via searchParams, not string interpolation.
+      // Use URL object so apiKey is set via searchParams, not string interpolation.
       // This prevents the key from appearing in raw template-literal log output.
       const buildEtherscanUrl = (module: string, action: string) => {
         const u = new URL('https://api.etherscan.io/v2/api')
@@ -60,15 +60,20 @@ export async function GET(req: NextRequest) {
           functionName: tx.functionName || '',
         })) : []
 
-        const tokenTxs = Array.isArray(tokenData.result) ? tokenData.result.map((tx: any) => ({
-          hash: tx.hash,
-          type: tx.from?.toLowerCase() === addrLower ? 'send' : 'receive',
-          from: tx.from, to: tx.to,
-          valueNative: (Number(tx.value) / Math.pow(10, Number(tx.tokenDecimal || 18))).toFixed(4),
-          symbol: tx.tokenSymbol || '?',
-          timestamp: Number(tx.timeStamp),
-          isError: false, isToken: true, functionName: '',
-        })) : []
+        // Fix #8 (MÉDIO): Clamp tokenDecimal to [0, 36] to prevent Math.pow(10, 999)
+        // returning Infinity when a malicious or malformed API response is received.
+        const tokenTxs = Array.isArray(tokenData.result) ? tokenData.result.map((tx: any) => {
+          const dec = Math.min(Math.max(0, Number(tx.tokenDecimal || 18)), 36)
+          return {
+            hash: tx.hash,
+            type: tx.from?.toLowerCase() === addrLower ? 'send' : 'receive',
+            from: tx.from, to: tx.to,
+            valueNative: (Number(tx.value) / Math.pow(10, dec)).toFixed(4),
+            symbol: tx.tokenSymbol || '?',
+            timestamp: Number(tx.timeStamp),
+            isError: false, isToken: true, functionName: '',
+          }
+        }) : []
 
         const all = [...normalTxs, ...tokenTxs].sort((a, b) => b.timestamp - a.timestamp).slice(0, 100)
         return NextResponse.json({ transactions: all, source: 'etherscan' })
@@ -184,7 +189,17 @@ async function fetchNativeTxs(addrLower: string, fromBlockHex: string, latestBlo
             tx.value && tx.value !== '0x0' &&
             (tx.from?.toLowerCase() === addrLower || tx.to?.toLowerCase() === addrLower)
           ) {
-            results.push({ ...tx, blockNumber: block.result.number })
+            // Fix #4 (ALTO): Whitelist only the fields we need instead of spreading
+            // the entire RPC tx object (...tx). A malicious or compromised RPC node
+            // could inject unexpected fields that reach the client response.
+            results.push({
+              hash:        String(tx.hash        ?? ''),
+              from:        String(tx.from        ?? ''),
+              to:          String(tx.to          ?? ''),
+              value:       String(tx.value       ?? '0x0'),
+              input:       tx.input === '0x' ? '0x' : tx.input,
+              blockNumber: String(block.result.number ?? ''),
+            })
           }
         }
       } catch { /* skip block */ }

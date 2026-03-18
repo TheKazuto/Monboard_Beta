@@ -26,19 +26,16 @@ const nextConfig = {
           { key: 'Permissions-Policy',        value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()' },
           { key: 'X-XSS-Protection',          value: '0' },
           { key: 'X-Permitted-Cross-Domain-Policies', value: 'none' },
-          // SAMEORIGIN em vez de DENY — permite iframes same-origin
-          // (necessário para /api/ad-frame carregar dentro do AdBanner)
+          // SAMEORIGIN em vez de DENY — permite iframes same-origin.
+          // /api/ad-frame é carregado via iframe do próprio domínio,
+          // por isso SAMEORIGIN funciona correctamente e não precisa de override.
           { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
         ],
       },
-      {
-        // A rota do banner não deve enviar X-Frame-Options
-        // para que o iframe possa carregá-la sem conflito
-        source: '/api/ad-frame',
-        headers: [
-          { key: 'X-Frame-Options', value: '' },
-        ],
-      },
+      // Fix #11 (BAIXO): Removido o bloco que definia X-Frame-Options: '' para
+      // /api/ad-frame. Definir um header como string vazia tem comportamento
+      // inconsistente entre browsers. Como o iframe é same-origin, o valor
+      // global SAMEORIGIN já é suficiente e correcto para esta rota.
     ]
   },
 }
