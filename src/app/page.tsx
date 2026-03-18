@@ -38,13 +38,13 @@ const FEATURES = [
   {
     icon: '/features/feature-defi.png',
     title: 'DeFi Positions',
-    desc: 'All your active positions across 14+ Monad protocols — liquidity pools, lending, staking — in one view.',
+    desc: 'All your active positions across 14+ Monad protocols (liquidity pools, lending, staking) in one view.',
     tag: '14+ protocols',
   },
   {
     icon: '/features/feature-aprs.png',
     title: 'Best APRs',
-    desc: 'Real-time yield opportunities aggregated from every major Monad protocol. No hardcoded values.',
+    desc: 'Real-time yield opportunities aggregated from every major Monad protocol.',
     tag: 'Real-time',
   },
   {
@@ -439,7 +439,7 @@ export default function LandingPage() {
             <span className="tag" style={{ marginBottom: '0.75rem', display: 'inline-block' }}>Integrations</span>
             <h2 className="land-h2">The whole Monad ecosystem, connected</h2>
             <p style={{ color: 'var(--land-muted)', marginTop: '0.5rem', fontSize: '0.95rem' }}>
-              Live data from every major protocol — no hardcoded values, ever.
+              Live data from every major protocol.
             </p>
           </div>
 
@@ -464,7 +464,7 @@ export default function LandingPage() {
                 <span className="grad-text">By Shinka Labs.</span>
               </h2>
               <p style={{ color: 'var(--land-muted)', lineHeight: 1.75, fontSize: '0.95rem' }}>
-                MonBoard is crafted specifically for the Monad ecosystem — not a generic multi-chain dashboard with Monad added as an afterthought. Every integration is native, every data point is live, and every feature is designed around how Monad actually works.
+                MonBoard is crafted specifically for the Monad ecosystem, not a generic multi-chain dashboard with Monad added as an afterthought. Every integration is native, every data point is live, and every feature is designed around how Monad actually works.
               </p>
               <div style={{ marginTop: '1.75rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
                 <Link href="/dashboard" className="btn-launch">Open dashboard →</Link>
